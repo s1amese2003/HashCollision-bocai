@@ -192,12 +192,22 @@ describe('market lifecycle', () => {
     const trader = await signup('bob');
     const id = await newMarket(creator, 100, 1);
 
-    const broke = await call('POST', `/api/markets/${id}/trade`, trader, {
+    // A 1000-point buy is truncated at 99%, so it only spends part of the balance...
+    const capped = await call('POST', `/api/markets/${id}/trade`, trader, {
       outcome: 'YES',
       side: 'BUY',
-      amount: cfg.signupBonus + 1,
+      amount: cfg.signupBonus,
+    });
+    expect(capped.body.quote.capped).toBe(true);
+    // ...then a NO buy that fits under the cap but exceeds what's left must fail.
+    const left = capped.body.balance as number;
+    const broke = await call('POST', `/api/markets/${id}/trade`, trader, {
+      outcome: 'NO',
+      side: 'BUY',
+      amount: left + 1,
     });
     expect(broke.status).toBe(400);
+    expect(broke.body.error.code).toBe('INSUFFICIENT_BALANCE');
 
     clock += 2 * HOUR;
     const late = await call('POST', `/api/markets/${id}/trade`, trader, { outcome: 'YES', side: 'BUY', amount: SCALE });
@@ -331,5 +341,81 @@ describe('accounting under random trading', () => {
     expect(lb.length).toBe(5);
     const sumProfit = lb.reduce((s: number, x: any) => s + x.profit, 0);
     expect(sumProfit).toBe(0); // zero-sum once everything is settled
+  });
+});
+
+describe('price band 1%-99%', () => {
+  it('truncates a buy at 99% and rejects further buys on that side', async () => {
+    const creator = await signup('alice');
+    const whale = await signup('bob');
+    const id = await newMarket(creator, 100); // b ~ 144 points, far below a 1000-point balance
+
+    const q = await call('POST', `/api/markets/${id}/quote`, undefined, { outcome: 'YES', side: 'BUY', amount: 1000 * SCALE });
+    expect(q.body.quote.capped).toBe(true);
+    expect(q.body.quote.priceYesAfter).toBeLessThanOrEqual(0.99);
+    expect(q.body.quote.amount).toBeLessThan(1000 * SCALE);
+
+    const t = await call('POST', `/api/markets/${id}/trade`, whale, {
+      outcome: 'YES',
+      side: 'BUY',
+      amount: 1000 * SCALE,
+      minShares: q.body.quote.shares,
+    });
+    expect(t.status).toBe(200);
+    expect(t.body.quote.capped).toBe(true);
+    // Only the capped cost was charged.
+    expect(t.body.balance).toBe(cfg.signupBonus - t.body.quote.amount);
+
+    const again = await call('POST', `/api/markets/${id}/trade`, whale, { outcome: 'YES', side: 'BUY', amount: 10 * SCALE });
+    expect(again.status).toBe(400);
+    expect(again.body.error.code).toBe('PRICE_LIMIT');
+
+    // Trading back toward the middle is still allowed.
+    const back = await call('POST', `/api/markets/${id}/trade`, whale, { outcome: 'NO', side: 'BUY', amount: 10 * SCALE });
+    expect(back.status).toBe(200);
+    expect(reconcile(db).ok).toBe(true);
+  });
+
+  it('truncates a sell that would push the other side past 99%', async () => {
+    const creator = await signup('alice');
+    const noHolder = await signup('bob');
+    const yesHolder = await signup('carol');
+    const id = await newMarket(creator, 100);
+
+    // Build large positions on both sides while staying inside the band.
+    for (let i = 0; i < 6; i++) {
+      await call('POST', `/api/markets/${id}/trade`, noHolder, { outcome: 'NO', side: 'BUY', amount: 80 * SCALE });
+      await call('POST', `/api/markets/${id}/trade`, yesHolder, { outcome: 'YES', side: 'BUY', amount: 80 * SCALE });
+    }
+    const held = (await call('GET', `/api/markets/${id}`, noHolder)).body.positions.NO.shares;
+    const sell = await call('POST', `/api/markets/${id}/trade`, noHolder, { outcome: 'NO', side: 'SELL', shares: held });
+    expect(sell.status).toBe(200);
+    expect(sell.body.quote.capped).toBe(true);
+    expect(sell.body.quote.shares).toBeLessThan(held);
+    expect(sell.body.quote.priceYesAfter).toBeLessThanOrEqual(0.99);
+
+    const left = (await call('GET', `/api/markets/${id}`, noHolder)).body.positions.NO.shares;
+    expect(left).toBe(held - sell.body.quote.shares);
+    const more = await call('POST', `/api/markets/${id}/trade`, noHolder, { outcome: 'NO', side: 'SELL', shares: left });
+    expect(more.status).toBe(400);
+    expect(more.body.error.code).toBe('PRICE_LIMIT');
+    expect(reconcile(db).ok).toBe(true);
+    expect(totalPoints()).toBe(totalGranted());
+  });
+
+  it('replaying the production exploit no longer lets anyone buy at 100%', async () => {
+    const creator = await signup('alice');
+    const users = [await signup('u1'), await signup('u2'), await signup('u3')];
+    const id = await newMarket(creator, 100);
+    for (const u of users) {
+      await call('POST', `/api/markets/${id}/trade`, u, { outcome: 'YES', side: 'BUY', amount: 1000 * SCALE });
+    }
+    const trades = db.prepare('SELECT amount, shares FROM trades WHERE market_id = ?').all(id) as {
+      amount: number;
+      shares: number;
+    }[];
+    // Only the first buyer got filled (and only up to 99%); nobody paid ~1 point per share.
+    expect(trades.length).toBe(1);
+    for (const t of trades) expect(t.amount / t.shares).toBeLessThan(0.99);
   });
 });

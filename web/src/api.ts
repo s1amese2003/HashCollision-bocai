@@ -69,6 +69,8 @@ export interface Quote {
   priceYesBefore: number;
   priceYesAfter: number;
   avgPrice: number;
+  /** True when the trade was truncated to keep the price within 1%-99%. */
+  capped: boolean;
 }
 
 export interface PortfolioItem {

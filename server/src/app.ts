@@ -23,8 +23,9 @@ import type { DB } from './db.js';
 import { AppError, forbidden, unauthorized } from './errors.js';
 import { Hub } from './hub.js';
 import { reconcile } from './ledger.js';
-import { SCALE, type Quote } from './market/lmsr.js';
+import { SCALE } from './market/lmsr.js';
 import {
+  type BoundedQuote,
   adminResolve,
   cancelMarket,
   closeExpired,
@@ -100,7 +101,7 @@ function publicUser(u: User, cfg: Config, now: number) {
   };
 }
 
-function quoteView(q: Quote) {
+function quoteView(q: BoundedQuote) {
   return {
     outcome: q.outcome,
     side: q.side,
@@ -109,6 +110,7 @@ function quoteView(q: Quote) {
     priceYesBefore: q.priceYesBefore,
     priceYesAfter: q.priceYesAfter,
     avgPrice: q.avgPrice,
+    capped: q.capped,
   };
 }
 

@@ -5,6 +5,9 @@ import { badRequest, conflict, forbidden, notFound } from './errors.js';
 import { applyDelta } from './ledger.js';
 import {
   LmsrError,
+  PRICE_CAP,
+  maxBuyShares,
+  maxSellShares,
   type Outcome,
   type PoolState,
   type Quote,
@@ -12,6 +15,7 @@ import {
   priceOf,
   priceYes,
   quoteBuyAmount,
+  quoteBuyShares,
   quoteSellShares,
   requiredSubsidy,
 } from './market/lmsr.js';
@@ -216,21 +220,40 @@ function assertTradable(m: MarketRow, now: number): void {
   if (effectiveStatus(m, now) !== 'OPEN') throw conflict('MARKET_NOT_OPEN', '市场已停止交易');
 }
 
-function computeQuote(m: MarketRow, req: TradeRequest): Quote {
+/** A quote, possibly truncated so the price stays inside the allowed band. */
+export type BoundedQuote = Quote & { capped: boolean };
+
+const OUTCOME_CN: Record<Outcome, string> = { YES: '是', NO: '否' };
+const CAP_PCT = Math.round(PRICE_CAP * 100);
+
+function computeQuote(m: MarketRow, req: TradeRequest): BoundedQuote {
+  const s = pool(m);
   try {
     if (req.side === 'BUY') {
       if (!req.amount) throw badRequest('BAD_AMOUNT', '请输入买入金额');
-      return quoteBuyAmount(pool(m), req.outcome, req.amount);
+      const limit = maxBuyShares(s, req.outcome);
+      if (limit < 1) {
+        throw badRequest('PRICE_LIMIT', `「${OUTCOME_CN[req.outcome]}」的价格已达 ${CAP_PCT}% 上限，暂时不能继续买入`);
+      }
+      const q = quoteBuyAmount(s, req.outcome, req.amount);
+      if (q.shares <= limit) return { ...q, capped: false };
+      return { ...quoteBuyShares(s, req.outcome, limit), capped: true };
     }
     if (!req.shares) throw badRequest('BAD_SHARES', '请输入卖出份数');
-    return quoteSellShares(pool(m), req.outcome, req.shares);
+    const other: Outcome = req.outcome === 'YES' ? 'NO' : 'YES';
+    const limit = maxSellShares(s, req.outcome);
+    if (limit < 1) {
+      throw badRequest('PRICE_LIMIT', `「${OUTCOME_CN[other]}」的价格已达 ${CAP_PCT}% 上限，暂时不能继续卖出`);
+    }
+    if (req.shares <= limit) return { ...quoteSellShares(s, req.outcome, req.shares), capped: false };
+    return { ...quoteSellShares(s, req.outcome, limit), capped: true };
   } catch (e) {
     if (e instanceof LmsrError) throw badRequest('BAD_TRADE', '数量无效或太小');
     throw e;
   }
 }
 
-export function quoteTrade(db: DB, marketId: number, req: TradeRequest, now: number): Quote {
+export function quoteTrade(db: DB, marketId: number, req: TradeRequest, now: number): BoundedQuote {
   const m = getRow(db, marketId);
   assertTradable(m, now);
   return computeQuote(m, req);
@@ -258,7 +281,7 @@ function setPosition(db: DB, userId: number, marketId: number, outcome: Outcome,
 
 export interface TradeResult {
   tradeId: number;
-  quote: Quote;
+  quote: BoundedQuote;
   balance: number;
 }
 

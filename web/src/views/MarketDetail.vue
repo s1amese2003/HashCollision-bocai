@@ -83,9 +83,14 @@ function setMax() {
 
 const insufficient = computed(() => {
   const units = toUnits(input.value ?? 0);
-  if (side.value === 'BUY') return units > (store.me?.balance ?? 0);
+  // A buy may be truncated at the price cap, so compare what will actually be spent.
+  if (side.value === 'BUY') return (quote.value?.amount ?? units) > (store.me?.balance ?? 0);
   return units > held.value;
 });
+
+/** Buying at an average price this high has little upside and full downside. */
+const HIGH_PRICE = 0.95;
+const highPrice = computed(() => quote.value?.side === 'BUY' && quote.value.avgPrice >= HIGH_PRICE);
 
 async function submitTrade() {
   if (!quote.value) return;
@@ -330,6 +335,20 @@ const chartEnd = computed(() => {
           </div>
           <div v-else-if="quoteError" class="small no-text">{{ quoteError }}</div>
 
+          <div v-if="quote?.capped" class="alert small">
+            <template v-if="quote.side === 'BUY'">
+              价格最高只能到 99%，本次只能买入 {{ pts(quote.shares) }} 份，实际花费 {{ pts(quote.amount) }} 积分。
+            </template>
+            <template v-else>
+              价格最高只能到 99%，本次只能卖出 {{ pts(quote.shares) }} 份，其余等价格回落后再卖。
+            </template>
+          </div>
+          <div v-if="highPrice" class="alert warn small">
+            成交均价 {{ (quote!.avgPrice * 100).toFixed(1) }}%：猜对最多只赚
+            {{ pts(quote!.shares - quote!.amount) }} 积分（{{ ((quote!.shares / quote!.amount - 1) * 100).toFixed(1) }}%），
+            猜错会亏掉全部 {{ pts(quote!.amount) }} 积分。
+          </div>
+
           <button
             class="full"
             :class="outcome === 'YES' ? 'yes' : 'no'"
@@ -337,7 +356,7 @@ const chartEnd = computed(() => {
             @click="submitTrade"
           >
             <template v-if="insufficient">{{ side === 'BUY' ? '积分不足' : '份数不足' }}</template>
-            <template v-else>{{ side === 'BUY' ? '买入' : '卖出' }}「{{ OUTCOME_LABEL[outcome] }}」</template>
+            <template v-else>{{ highPrice ? '仍要' : '' }}{{ side === 'BUY' ? '买入' : '卖出' }}「{{ OUTCOME_LABEL[outcome] }}」</template>
           </button>
         </template>
       </div>
@@ -477,6 +496,16 @@ h3 {
 .strong {
   font-weight: 600;
   margin-top: 4px;
+}
+.alert {
+  background: var(--accent-soft);
+  color: var(--accent);
+  border-radius: 9px;
+  padding: 9px 12px;
+}
+.alert.warn {
+  background: var(--warn-soft);
+  color: var(--warn);
 }
 .full {
   width: 100%;

@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import {
   LmsrError,
+  PRICE_CAP,
+  maxBuyShares,
+  maxSellShares,
   type Outcome,
   type PoolState,
   SCALE,
@@ -172,5 +175,32 @@ describe('market maker loss bound', () => {
         expect(loss).toBeLessThanOrEqual(subsidy);
       }
     }
+  });
+});
+
+describe('price cap helpers', () => {
+  it('maxBuyShares lands exactly at the cap', () => {
+    const s = fresh();
+    const n = maxBuyShares(s, 'YES');
+    expect(n).toBe(Math.floor(B * Math.log(PRICE_CAP / (1 - PRICE_CAP))));
+    expect(quoteBuyShares(s, 'YES', n).priceYesAfter).toBeLessThanOrEqual(PRICE_CAP);
+    expect(quoteBuyShares(s, 'YES', n + 2).priceYesAfter).toBeGreaterThan(PRICE_CAP);
+  });
+
+  it('maxBuyShares is <= 0 once the price is at or past the cap', () => {
+    const s: PoolState = { b: B, qYes: maxBuyShares(fresh(), 'YES') + 10, qNo: 0 };
+    expect(maxBuyShares(s, 'YES')).toBeLessThanOrEqual(0);
+    expect(maxBuyShares(s, 'NO')).toBeGreaterThan(0);
+  });
+
+  it('maxSellShares keeps the opposite price under the cap and never exceeds holdings', () => {
+    const s: PoolState = { b: B, qYes: 1500 * SCALE, qNo: 1000 * SCALE };
+    const n = maxSellShares(s, 'YES');
+    expect(n).toBeLessThan(s.qYes);
+    const q = quoteSellShares(s, 'YES', n);
+    expect(1 - q.priceYesAfter).toBeLessThanOrEqual(PRICE_CAP + 1e-12);
+
+    const small: PoolState = { b: B, qYes: 10 * SCALE, qNo: 0 };
+    expect(maxSellShares(small, 'YES')).toBe(small.qYes);
   });
 });

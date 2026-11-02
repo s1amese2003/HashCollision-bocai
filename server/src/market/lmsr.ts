@@ -158,6 +158,31 @@ export function quoteBuyAmount(s: PoolState, outcome: Outcome, amount: number): 
   return makeQuote(s, next, outcome, 'BUY', shares, buyCost(s, outcome, shares));
 }
 
+/** Prices are kept inside [1 - PRICE_CAP, PRICE_CAP]. */
+export const PRICE_CAP = 0.99;
+
+/**
+ * Largest number of share units that can be bought on `outcome` without its
+ * price exceeding `cap`. May be <= 0 when the price is already at or past the cap.
+ *
+ * p_mine <= cap  <=>  q_mine - q_other <= b * ln(cap / (1 - cap))
+ */
+export function maxBuyShares(s: PoolState, outcome: Outcome, cap = PRICE_CAP): number {
+  const mine = held(s, outcome);
+  const other = outcome === 'YES' ? s.qNo : s.qYes;
+  return Math.floor(s.b * Math.log(cap / (1 - cap)) - (mine - other));
+}
+
+/**
+ * Largest number of share units of `outcome` that can be sold without the
+ * opposite outcome's price exceeding `cap` (selling X raises the price of not-X).
+ */
+export function maxSellShares(s: PoolState, outcome: Outcome, cap = PRICE_CAP): number {
+  const mine = held(s, outcome);
+  const other = outcome === 'YES' ? s.qNo : s.qYes;
+  return Math.min(mine, Math.floor(s.b * Math.log(cap / (1 - cap)) - (other - mine)));
+}
+
 /** Sell `shares` units of `outcome` back to the pool. */
 export function quoteSellShares(s: PoolState, outcome: Outcome, shares: number): Quote {
   assertState(s);
