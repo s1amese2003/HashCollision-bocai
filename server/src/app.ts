@@ -19,13 +19,14 @@ import {
   userFromSession,
 } from './auth.js';
 import type { Config } from './config.js';
-import type { DB } from './db.js';
+import { type DB, isTradingHalted, setSetting } from './db.js';
 import { AppError, forbidden, unauthorized } from './errors.js';
 import { Hub } from './hub.js';
 import { reconcile } from './ledger.js';
 import { SCALE } from './market/lmsr.js';
 import {
   type BoundedQuote,
+  addLiquidity,
   adminResolve,
   cancelMarket,
   closeExpired,
@@ -38,8 +39,10 @@ import {
   portfolio,
   priceHistory,
   proposeResolution,
+  quoteLiquidity,
   quoteTrade,
   recentTrades,
+  setMarketPaused,
   userPositions,
 } from './markets.js';
 
@@ -64,7 +67,8 @@ export interface App {
 const username = z
   .string()
   .trim()
-  .regex(/^[A-Za-z0-9_一-龥]{2,20}$/, '用户名需为 2-20 位字母、数字、下划线或汉字');
+  .regex(/^[A-Za-z0-9_一-龥]{2,20}$/, '用户名需为 2-20 位字母、数字、下划线或汉字')
+  .refine((s) => !s.startsWith('__'), '用户名不能以两个下划线开头');
 const password = z.string().min(6, '密码至少 6 位').max(100);
 const outcome = z.enum(['YES', 'NO']);
 const unitsInt = z.number().int().positive().max(1e12);
@@ -89,6 +93,9 @@ const tradeBody = z.object({
 });
 const resolveBody = z.object({ outcome, note: z.string().trim().max(1000).default('') });
 const cancelBody = z.object({ note: z.string().trim().max(1000).default('') });
+const pauseBody = z.object({ paused: z.boolean() });
+const haltBody = z.object({ halted: z.boolean() });
+const liquidityBody = z.object({ amount: unitsInt, maxDeposit: z.number().int().nonnegative().optional() });
 const listQuery = z.object({ filter: z.enum(['active', 'closed', 'settled', 'all']).default('active') });
 
 function publicUser(u: User, cfg: Config, now: number) {
@@ -212,8 +219,10 @@ export async function buildApp(deps: AppDeps): Promise<App> {
         checkinBonus: cfg.checkinBonus,
         minSubsidy: cfg.minSubsidy,
         maxSubsidy: cfg.maxSubsidy,
+        houseSubsidy: cfg.houseSubsidy,
         disputeWindowMs: cfg.disputeWindowMs,
       },
+      tradingHalted: isTradingHalted(db),
     };
   });
 
@@ -303,6 +312,41 @@ export async function buildApp(deps: AppDeps): Promise<App> {
     cancelMarket(db, u, id, body.note, now());
     emitMarket(id);
     return { market: getMarket(db, cfg, id, now()) };
+  });
+
+  // --- admin controls ---------------------------------------------------------
+
+  app.post('/api/markets/:id/pause', async (req) => {
+    const u = requireAdmin(req);
+    const { id } = idParam.parse(req.params);
+    const { paused } = pauseBody.parse(req.body);
+    setMarketPaused(db, u, id, paused);
+    emitMarket(id);
+    return { market: getMarket(db, cfg, id, now()) };
+  });
+
+  app.post('/api/admin/halt', async (req) => {
+    requireAdmin(req);
+    const { halted } = haltBody.parse(req.body);
+    setSetting(db, 'trading_halted', halted ? '1' : '0');
+    hub.broadcast({ type: 'halt', halted });
+    return { tradingHalted: halted };
+  });
+
+  app.post('/api/markets/:id/liquidity/quote', async (req) => {
+    requireAdmin(req);
+    const { id } = idParam.parse(req.params);
+    const body = liquidityBody.parse(req.body);
+    return { quote: quoteLiquidity(db, id, body.amount, now()) };
+  });
+
+  app.post('/api/markets/:id/liquidity', async (req) => {
+    const u = requireAdmin(req);
+    const { id } = idParam.parse(req.params);
+    const body = liquidityBody.parse(req.body);
+    const quote = addLiquidity(db, u, id, body.amount, now(), body.maxDeposit);
+    emitMarket(id);
+    return { quote, market: getMarket(db, cfg, id, now()) };
   });
 
   // --- users ----------------------------------------------------------------

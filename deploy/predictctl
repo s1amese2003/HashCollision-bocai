@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# Operator CLI for the prediction market. Run as root on the server, e.g.:
+#   predictctl status | halt on|off | pause <id> on|off | reconcile
+set -euo pipefail
+set -a
+. /etc/predict.env
+set +a
+exec runuser -u predict -- /opt/node22/bin/node /opt/HashCollision-bocai/server/dist/cli.js "$@"

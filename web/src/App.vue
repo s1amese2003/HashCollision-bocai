@@ -15,6 +15,16 @@ async function checkin() {
   }
 }
 
+async function toggleHalt() {
+  try {
+    const r = await api.halt(!store.tradingHalted);
+    store.tradingHalted = r.tradingHalted;
+    toast(r.tradingHalted ? '已暂停全站交易' : '已恢复全站交易');
+  } catch (e) {
+    toastError(e);
+  }
+}
+
 async function logout() {
   await api.logout().catch(() => {});
   store.me = null;
@@ -49,6 +59,14 @@ async function logout() {
     </div>
   </header>
 
+  <div v-if="store.tradingHalted" class="halt-banner">
+    <div class="container row">
+      <span>全站交易已暂停，可以浏览，但暂时不能买卖。</span>
+      <div class="spacer" />
+      <button v-if="store.me?.role === 'admin'" class="small" @click="toggleHalt">恢复交易</button>
+    </div>
+  </div>
+
   <main class="container main">
     <RouterView />
   </main>
@@ -56,6 +74,9 @@ async function logout() {
   <footer class="container footer muted small">
     积分仅用于娱乐和练习预测能力，不可充值、提现或兑换。
     <a v-if="store.me" href="#" class="hide-lg" @click.prevent="logout">退出登录</a>
+    <template v-if="store.me?.role === 'admin' && !store.tradingHalted">
+      · <a href="#" class="admin-link" @click.prevent="toggleHalt">暂停全站交易</a>
+    </template>
   </footer>
 
   <Transition name="fade">
@@ -105,6 +126,15 @@ async function logout() {
   padding-top: 24px;
   padding-bottom: 32px;
   min-height: calc(100vh - 140px);
+}
+.halt-banner {
+  background: var(--warn-soft);
+  color: var(--warn);
+  font-weight: 500;
+  padding: 10px 0;
+}
+.admin-link {
+  color: var(--warn);
 }
 .footer {
   padding-bottom: 32px;

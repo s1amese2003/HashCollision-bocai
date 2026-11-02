@@ -84,7 +84,9 @@ async function submit() {
       <div>
         <label for="sub">流动性补贴：{{ subsidy }} 积分</label>
         <input id="sub" v-model.number="subsidy" type="range" :min="minS" :max="maxS" step="10" />
-        <div class="hint">补贴越多，价格越不容易被单笔交易推动。这是你最多可能亏掉的积分。</div>
+        <div class="hint">
+          平台会额外补贴 {{ (store.config?.houseSubsidy ?? 0) / SCALE }} 积分流动性。补贴越多，价格越不容易被单笔交易推动；你的补贴是你最多可能亏掉的积分。
+        </div>
       </div>
     </div>
 

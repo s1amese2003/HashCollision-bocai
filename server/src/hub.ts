@@ -2,6 +2,7 @@ import type { WebSocket } from 'ws';
 
 export type HubEvent =
   | { type: 'market'; marketId: number; priceYes: number; status: string; volume: number }
+  | { type: 'halt'; halted: boolean }
   | { type: 'trade'; marketId: number; username: string; outcome: string; side: string; amount: number; priceAfter: number };
 
 /** Fan-out of server events to connected WebSocket clients. */

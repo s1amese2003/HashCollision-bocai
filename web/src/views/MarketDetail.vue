@@ -11,6 +11,7 @@ import {
   SCALE,
   STATUS_LABEL,
   toUnits,
+  type LiquidityQuote,
   type Market,
   type Outcome,
   type Position,
@@ -54,6 +55,8 @@ const quoteError = ref('');
 const busy = ref(false);
 
 const isOpen = computed(() => market.value?.status === 'OPEN');
+/** Open, not paused by an admin, and no site-wide halt. */
+const canTrade = computed(() => isOpen.value && !market.value?.paused && !store.tradingHalted);
 const held = computed(() => positions.value?.[outcome.value].shares ?? 0);
 const priceOf = (o: Outcome) => (market.value ? (o === 'YES' ? market.value.priceYes : 1 - market.value.priceYes) : 0.5);
 
@@ -63,7 +66,7 @@ function requestQuote() {
   quote.value = null;
   quoteError.value = '';
   const units = toUnits(input.value ?? 0);
-  if (!isOpen.value || units <= 0) return;
+  if (!canTrade.value || units <= 0) return;
   quoteTimer = setTimeout(async () => {
     try {
       const body = side.value === 'BUY' ? { outcome: outcome.value, side: 'BUY', amount: units } : { outcome: outcome.value, side: 'SELL', shares: units };
@@ -157,6 +160,59 @@ const pendingLabel = computed(() => {
   return p.kind === 'propose' ? `确认提交结果为「${o}」？公示期结束后自动结算。` : `确认最终判定为「${o}」？将立即结算，无法撤销。`;
 });
 
+// --- admin trading controls --------------------------------------------------
+
+const liqInput = ref<number | null>(null);
+const liqQuote = ref<LiquidityQuote | null>(null);
+const liqError = ref('');
+let liqTimer: ReturnType<typeof setTimeout> | undefined;
+
+function requestLiquidityQuote() {
+  clearTimeout(liqTimer);
+  liqQuote.value = null;
+  liqError.value = '';
+  const units = toUnits(liqInput.value ?? 0);
+  if (!isAdmin.value || units <= 0) return;
+  liqTimer = setTimeout(async () => {
+    try {
+      liqQuote.value = (await api.liquidityQuote(props.id, units)).quote;
+    } catch (e) {
+      liqError.value = e instanceof Error ? e.message : String(e);
+    }
+  }, 250);
+}
+watch(liqInput, requestLiquidityQuote);
+
+async function submitLiquidity() {
+  if (!liqQuote.value) return;
+  busy.value = true;
+  try {
+    const r = await api.addLiquidity(props.id, toUnits(liqInput.value ?? 0), liqQuote.value.deposit);
+    toast(`已追加流动性，平台出资 ${pts(r.quote.deposit)} 积分`);
+    liqInput.value = null;
+    await load();
+  } catch (e) {
+    toastError(e);
+    requestLiquidityQuote();
+  } finally {
+    busy.value = false;
+  }
+}
+
+async function togglePause() {
+  if (!market.value) return;
+  busy.value = true;
+  try {
+    await api.pause(props.id, !market.value.paused);
+    toast(market.value.paused ? '已恢复交易' : '已暂停交易');
+    await load();
+  } catch (e) {
+    toastError(e);
+  } finally {
+    busy.value = false;
+  }
+}
+
 // --- live -------------------------------------------------------------------
 
 let reloadTimer: ReturnType<typeof setTimeout> | undefined;
@@ -165,7 +221,7 @@ let clock: ReturnType<typeof setInterval> | undefined;
 onMounted(() => {
   load();
   off = onLive((e) => {
-    if (e.marketId !== props.id || e.type !== 'market') return;
+    if (e.type !== 'market' || e.marketId !== props.id) return;
     clearTimeout(reloadTimer);
     reloadTimer = setTimeout(async () => {
       await load();
@@ -218,7 +274,7 @@ const chartEnd = computed(() => {
             <span class="muted">的概率认为“是”</span>
           </template>
           <div class="spacer" />
-          <span class="muted small num">成交 {{ pts(market.volume) }} · 流动性 {{ pts(market.subsidy) }}</span>
+          <span class="muted small num">成交 {{ pts(market.volume) }} · 流动性 {{ pts(market.subsidy + market.houseSubsidy) }}</span>
         </div>
 
         <PriceChart :points="history" :end="chartEnd" />
@@ -239,6 +295,10 @@ const chartEnd = computed(() => {
         <b>市场已作废</b>
         <p v-if="market.resolutionNote">{{ market.resolutionNote }}</p>
         <p class="small muted">所有参与者已按净投入退款。</p>
+      </div>
+      <div v-else-if="market.status === 'OPEN' && market.paused" class="card notice warn">
+        <b>管理员已暂停本市场的交易。</b>
+        <p class="small">持仓不受影响，恢复后可继续交易。</p>
       </div>
       <div v-else-if="market.status === 'CLOSED'" class="card notice warn">
         <b>交易已截止，等待创建者提交结果。</b>
@@ -301,8 +361,10 @@ const chartEnd = computed(() => {
         <template v-if="!store.me">
           <RouterLink to="/login"><button class="primary full">登录后交易</button></RouterLink>
         </template>
-        <template v-else-if="!isOpen">
-          <div class="muted small center">该市场已停止交易</div>
+        <template v-else-if="!canTrade">
+          <div class="muted small center">
+            {{ !isOpen ? '该市场已停止交易' : store.tradingHalted ? '全站交易已暂停' : '该市场已被管理员暂停交易' }}
+          </div>
         </template>
         <template v-else>
           <div>
@@ -400,6 +462,28 @@ const chartEnd = computed(() => {
           <div class="row">
             <button class="primary grow" :disabled="busy" @click="confirmAction">确认</button>
             <button class="grow" @click="pending = null">取消</button>
+          </div>
+        </template>
+      </div>
+
+      <!-- Admin trading controls -->
+      <div v-if="isAdmin && unsettled" class="card stack">
+        <h3>交易控制</h3>
+        <button class="full" :disabled="busy" @click="togglePause">
+          {{ market.paused ? '恢复本市场交易' : '暂停本市场交易' }}
+        </button>
+        <template v-if="isOpen">
+          <div>
+            <label for="liq">追加流动性（平台出资，价格不变）</label>
+            <div class="row">
+              <input id="liq" v-model.number="liqInput" type="number" min="0" step="10" placeholder="积分" />
+              <button class="primary" :disabled="!liqQuote || busy" @click="submitLiquidity">追加</button>
+            </div>
+            <div v-if="liqQuote" class="hint num">
+              平台实际出资 {{ pts(liqQuote.deposit) }} 积分，流动性参数从 {{ pts(liqQuote.bBefore) }} 提高到
+              {{ pts(liqQuote.bAfter) }}。价格越偏离 50%，出资越多。
+            </div>
+            <div v-else-if="liqError" class="small no-text">{{ liqError }}</div>
           </div>
         </template>
       </div>

@@ -18,6 +18,7 @@ export interface SiteConfig {
   checkinBonus: number;
   minSubsidy: number;
   maxSubsidy: number;
+  houseSubsidy: number;
   disputeWindowMs: number;
 }
 
@@ -33,6 +34,8 @@ export interface Market {
   priceYes: number;
   b: number;
   subsidy: number;
+  houseSubsidy: number;
+  paused: boolean;
   volume: number;
   closeAt: number;
   proposedOutcome: Outcome | null;
@@ -71,6 +74,13 @@ export interface Quote {
   avgPrice: number;
   /** True when the trade was truncated to keep the price within 1%-99%. */
   capped: boolean;
+}
+
+export interface LiquidityQuote {
+  bBefore: number;
+  bAfter: number;
+  deposit: number;
+  priceYes: number;
 }
 
 export interface PortfolioItem {
@@ -125,7 +135,7 @@ async function request<T>(method: string, url: string, body?: unknown): Promise<
 }
 
 export const api = {
-  me: () => request<{ user: Me | null; config: SiteConfig }>('GET', '/api/me'),
+  me: () => request<{ user: Me | null; config: SiteConfig; tradingHalted: boolean }>('GET', '/api/me'),
   register: (username: string, password: string) =>
     request<{ user: Me }>('POST', '/api/register', { username, password }),
   login: (username: string, password: string) =>
@@ -156,6 +166,12 @@ export const api = {
   resolve: (id: number, outcome: Outcome, note: string) =>
     request<{ market: Market }>('POST', `/api/markets/${id}/resolve`, { outcome, note }),
   cancel: (id: number, note: string) => request<{ market: Market }>('POST', `/api/markets/${id}/cancel`, { note }),
+  pause: (id: number, paused: boolean) => request<{ market: Market }>('POST', `/api/markets/${id}/pause`, { paused }),
+  halt: (halted: boolean) => request<{ tradingHalted: boolean }>('POST', '/api/admin/halt', { halted }),
+  liquidityQuote: (id: number, amount: number) =>
+    request<{ quote: LiquidityQuote }>('POST', `/api/markets/${id}/liquidity/quote`, { amount }),
+  addLiquidity: (id: number, amount: number, maxDeposit: number) =>
+    request<{ quote: LiquidityQuote; market: Market }>('POST', `/api/markets/${id}/liquidity`, { amount, maxDeposit }),
 
   portfolio: () => request<{ positions: PortfolioItem[]; ledger: LedgerRow[] }>('GET', '/api/portfolio'),
   leaderboard: () => request<{ leaderboard: LeaderRow[] }>('GET', '/api/leaderboard'),
@@ -219,4 +235,5 @@ export const REASON_LABEL: Record<string, string> = {
   payout: '结算兑付',
   subsidy_return: '补贴返还',
   cancel_refund: '作废退款',
+  house_mint: '平台注资',
 };

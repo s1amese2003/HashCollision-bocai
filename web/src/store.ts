@@ -5,6 +5,7 @@ export const store = reactive({
   me: null as Me | null,
   config: null as SiteConfig | null,
   loaded: false,
+  tradingHalted: false,
   toast: '' as string,
   toastKind: 'info' as 'info' | 'error',
 });
@@ -25,6 +26,7 @@ export async function refreshMe() {
   const r = await api.me();
   store.me = r.user;
   store.config = r.config;
+  store.tradingHalted = r.tradingHalted;
   store.loaded = true;
 }
 
@@ -32,6 +34,7 @@ export async function refreshMe() {
 
 export type LiveEvent =
   | { type: 'market'; marketId: number; priceYes: number; status: string; volume: number }
+  | { type: 'halt'; halted: boolean }
   | { type: 'trade'; marketId: number; username: string; outcome: string; side: string; amount: number; priceAfter: number };
 
 type Listener = (e: LiveEvent) => void;
@@ -50,6 +53,7 @@ export function connectLive() {
   ws.onmessage = (msg) => {
     try {
       const e = JSON.parse(msg.data) as LiveEvent;
+      if (e.type === 'halt') store.tradingHalted = e.halted;
       for (const fn of listeners) fn(e);
     } catch {
       /* ignore malformed */

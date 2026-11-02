@@ -25,6 +25,8 @@ export interface Config {
   /** Subsidy limits for market creation, in units. */
   minSubsidy: number;
   maxSubsidy: number;
+  /** Liquidity the platform adds to every new market on top of the creator's subsidy. */
+  houseSubsidy: number;
   /** How long a creator's proposed resolution can be overridden by an admin. */
   disputeWindowMs: number;
   sessionTtlMs: number;
@@ -44,8 +46,9 @@ export function loadConfig(overrides: Partial<Config> = {}): Config {
     signupBonus: int('SIGNUP_BONUS', 1000) * SCALE,
     checkinBonus: int('CHECKIN_BONUS', 100) * SCALE,
     dayOffsetMinutes: int('DAY_OFFSET_MINUTES', 480),
-    minSubsidy: int('MIN_SUBSIDY', 20) * SCALE,
+    minSubsidy: int('MIN_SUBSIDY', 50) * SCALE,
     maxSubsidy: int('MAX_SUBSIDY', 2000) * SCALE,
+    houseSubsidy: int('HOUSE_SUBSIDY', 500) * SCALE,
     disputeWindowMs: int('DISPUTE_WINDOW_HOURS', 24) * 3600_000,
     sessionTtlMs: int('SESSION_TTL_DAYS', 30) * 86400_000,
     ...overrides,

@@ -94,7 +94,45 @@ const MIGRATIONS: string[] = [
   CREATE INDEX trades_market ON trades(market_id, id);
   CREATE INDEX trades_user ON trades(user_id, id);
   `,
+  `
+  -- Platform-funded liquidity. The house is a system account that cannot log in.
+  ALTER TABLE markets ADD COLUMN house_subsidy INTEGER NOT NULL DEFAULT 0;
+  -- Virtual shares owned by the pool, used to keep the price unchanged when
+  -- liquidity (b) is added. LMSR state = (q_yes + v_yes, q_no + v_no).
+  ALTER TABLE markets ADD COLUMN v_yes INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE markets ADD COLUMN v_no INTEGER NOT NULL DEFAULT 0;
+  -- Admin can pause a single market; a global switch lives in settings.
+  ALTER TABLE markets ADD COLUMN paused INTEGER NOT NULL DEFAULT 0;
+  CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+  INSERT OR IGNORE INTO users (username, password_hash, role, created_at)
+  VALUES ('__house__', '!', 'user', CAST(strftime('%s', 'now') AS INTEGER) * 1000);
+  `,
 ];
+
+export const HOUSE_USERNAME = '__house__';
+
+export function getSetting(db: DB, key: string): string | undefined {
+  const row = db.prepare('SELECT value FROM settings WHERE key = ?').get(key) as { value: string } | undefined;
+  return row?.value;
+}
+
+export function setSetting(db: DB, key: string, value: string): void {
+  db.prepare(
+    'INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value',
+  ).run(key, value);
+}
+
+export function isTradingHalted(db: DB): boolean {
+  return getSetting(db, 'trading_halted') === '1';
+}
+
+export function houseId(db: DB): number {
+  const row = db.prepare('SELECT id FROM users WHERE username = ?').get(HOUSE_USERNAME) as
+    | { id: number }
+    | undefined;
+  if (!row) throw new Error('house account missing');
+  return row.id;
+}
 
 export function openDb(path: string): DB {
   if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true });

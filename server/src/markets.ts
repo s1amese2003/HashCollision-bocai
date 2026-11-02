@@ -1,11 +1,12 @@
 import type { User } from './auth.js';
 import type { Config } from './config.js';
-import type { DB } from './db.js';
+import { type DB, houseId, isTradingHalted } from './db.js';
 import { badRequest, conflict, forbidden, notFound } from './errors.js';
 import { applyDelta } from './ledger.js';
 import {
   LmsrError,
   PRICE_CAP,
+  cost,
   maxBuyShares,
   maxSellShares,
   type Outcome,
@@ -45,6 +46,10 @@ export interface MarketRow {
   resolved_at: number | null;
   resolution_note: string | null;
   created_at: number;
+  house_subsidy: number;
+  v_yes: number;
+  v_no: number;
+  paused: number;
 }
 
 export interface MarketView {
@@ -58,7 +63,11 @@ export interface MarketView {
   status: MarketStatus;
   priceYes: number;
   b: number;
+  /** Creator's subsidy, in units. */
   subsidy: number;
+  /** Platform-funded liquidity, in units. */
+  houseSubsidy: number;
+  paused: boolean;
   volume: number;
   closeAt: number;
   proposedOutcome: Outcome | null;
@@ -74,8 +83,9 @@ export interface MarketView {
 
 const SETTLED: MarketStatus[] = ['RESOLVED', 'CANCELLED'];
 
+/** LMSR state: user-held shares plus the pool's virtual shares. */
 function pool(m: MarketRow): PoolState {
-  return { b: m.b, qYes: m.q_yes, qNo: m.q_no };
+  return { b: m.b, qYes: m.q_yes + m.v_yes, qNo: m.q_no + m.v_no };
 }
 
 /** OPEN markets past their close time are reported as CLOSED even before the sweeper runs. */
@@ -100,6 +110,8 @@ export function toView(
     priceYes: priceYes(pool(m)),
     b: m.b,
     subsidy: m.subsidy,
+    houseSubsidy: m.house_subsidy,
+    paused: m.paused === 1,
     volume: m.volume,
     closeAt: m.close_at,
     proposedOutcome: m.proposed_outcome,
@@ -171,16 +183,19 @@ export function createMarket(
   if (input.subsidy < cfg.minSubsidy || input.subsidy > cfg.maxSubsidy) {
     throw badRequest('BAD_SUBSIDY', '补贴超出允许范围');
   }
-  // Choose the largest b whose worst-case loss is covered by the subsidy.
-  const b = Math.floor(input.subsidy / Math.LN2);
-  if (requiredSubsidy(b) > input.subsidy) throw new Error('subsidy rounding');
+  // Liquidity = creator subsidy + platform subsidy. Choose the largest b whose
+  // worst-case loss is covered by the combined pool.
+  const house = cfg.houseSubsidy;
+  const total = input.subsidy + house;
+  const b = Math.floor(total / Math.LN2);
+  if (requiredSubsidy(b) > total) throw new Error('subsidy rounding');
 
   return db.transaction(() => {
     const r = db
       .prepare(
-        `INSERT INTO markets (creator_id, title, description, rules, source_url, b, subsidy, pool,
-                              status, close_at, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'OPEN', ?, ?)`,
+        `INSERT INTO markets (creator_id, title, description, rules, source_url, b, subsidy, house_subsidy,
+                              pool, status, close_at, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'OPEN', ?, ?)`,
       )
       .run(
         user.id,
@@ -190,14 +205,129 @@ export function createMarket(
         input.sourceUrl ?? null,
         b,
         input.subsidy,
-        input.subsidy,
+        house,
+        total,
         input.closeAt,
         now,
       );
     const id = Number(r.lastInsertRowid);
     applyDelta(db, user.id, -input.subsidy, 'subsidy', `m${id}`, now);
+    if (house > 0) fundFromHouse(db, house, `m${id}`, now);
     return id;
   })();
+}
+
+/**
+ * Debit `amount` from the house account, minting any shortfall first so the
+ * platform's contributions are fully journaled. Must run inside a transaction.
+ */
+function fundFromHouse(db: DB, amount: number, refId: string, now: number): void {
+  const id = houseId(db);
+  const { balance } = db.prepare('SELECT balance FROM users WHERE id = ?').get(id) as { balance: number };
+  if (balance < amount) applyDelta(db, id, amount - balance, 'house_mint', refId, now);
+  applyDelta(db, id, -amount, 'subsidy', refId, now);
+}
+
+/**
+ * Return what is left in a settled market's pool to its liquidity providers,
+ * pro-rata to what each put in (creator vs. platform). Must run inside a transaction.
+ */
+function returnLeftover(db: DB, m: MarketRow, left: number, now: number): void {
+  if (left <= 0) return;
+  const total = m.subsidy + m.house_subsidy;
+  const toCreator = total > 0 ? Math.floor((left * m.subsidy) / total) : left;
+  const toHouse = left - toCreator;
+  if (toCreator > 0) applyDelta(db, m.creator_id, toCreator, 'subsidy_return', `m${m.id}`, now);
+  if (toHouse > 0) applyDelta(db, houseId(db), toHouse, 'subsidy_return', `m${m.id}`, now);
+}
+
+// ---------------------------------------------------------------------------
+// Liquidity
+// ---------------------------------------------------------------------------
+
+export interface LiquidityQuote {
+  bBefore: number;
+  bAfter: number;
+  /** Points the platform must put in, in units. */
+  deposit: number;
+  priceYes: number;
+}
+
+/**
+ * Platform adds liquidity without moving the price.
+ *
+ * Raising b alone would pull the price toward 50%, so the pool also takes
+ * virtual shares on the leading side to keep (qYes - qNo) / b unchanged.
+ * Safety invariant (constant across trades, must stay >= 0):
+ *     pool - C_b(q + v) + min(vYes, vNo)
+ * so the deposit is whatever keeps that margin unchanged after the change.
+ * Adding liquidity near the price band is expensive by design: it lets traders
+ * buy the cheap side over a much wider range.
+ */
+function planLiquidity(m: MarketRow, extra: number): LiquidityQuote & { vYes: number; vNo: number } {
+  const s = pool(m);
+  const p = priceYes(s);
+  if (p < 1 - PRICE_CAP || p > PRICE_CAP) {
+    throw conflict('PRICE_OUT_OF_BAND', '当前价格超出 1%–99%，等价格回到区间内再追加流动性');
+  }
+  const bAfter = m.b + Math.floor(extra / Math.LN2);
+  if (bAfter <= m.b) throw badRequest('BAD_AMOUNT', '追加数量太小');
+
+  const d = s.qYes - s.qNo;
+  const grow = Math.round((Math.abs(d) * bAfter) / m.b) - Math.abs(d);
+  const vYes = m.v_yes + (d > 0 ? grow : 0);
+  const vNo = m.v_no + (d < 0 ? grow : 0);
+  const after: PoolState = { b: bAfter, qYes: m.q_yes + vYes, qNo: m.q_no + vNo };
+
+  const deposit = Math.max(
+    0,
+    Math.ceil(cost(after) - cost(s) - (Math.min(vYes, vNo) - Math.min(m.v_yes, m.v_no))),
+  );
+  return { bBefore: m.b, bAfter, deposit, priceYes: priceYes(after), vYes, vNo };
+}
+
+export function quoteLiquidity(db: DB, marketId: number, extra: number, now: number): LiquidityQuote {
+  const m = getRow(db, marketId);
+  if (effectiveStatus(m, now) !== 'OPEN') throw conflict('MARKET_NOT_OPEN', '只能给交易中的市场追加流动性');
+  const { vYes: _y, vNo: _n, ...q } = planLiquidity(m, extra);
+  return q;
+}
+
+export function addLiquidity(
+  db: DB,
+  admin: User,
+  marketId: number,
+  extra: number,
+  now: number,
+  maxDeposit?: number,
+): LiquidityQuote {
+  if (admin.role !== 'admin') throw forbidden();
+  return db.transaction(() => {
+    const m = getRow(db, marketId);
+    if (effectiveStatus(m, now) !== 'OPEN') throw conflict('MARKET_NOT_OPEN', '只能给交易中的市场追加流动性');
+    const plan = planLiquidity(m, extra);
+    if (maxDeposit !== undefined && plan.deposit > maxDeposit) {
+      throw conflict('SLIPPAGE', '价格已变动，所需注资增加，请重新确认');
+    }
+    if (plan.deposit > 0) fundFromHouse(db, plan.deposit, `m${m.id}:b${plan.bAfter}`, now);
+    db.prepare(
+      `UPDATE markets SET b = ?, v_yes = ?, v_no = ?, pool = pool + ?, house_subsidy = house_subsidy + ?
+       WHERE id = ?`,
+    ).run(plan.bAfter, plan.vYes, plan.vNo, plan.deposit, plan.deposit, m.id);
+    const { vYes: _y, vNo: _n, ...q } = plan;
+    return q;
+  })();
+}
+
+// ---------------------------------------------------------------------------
+// Pausing
+// ---------------------------------------------------------------------------
+
+export function setMarketPaused(db: DB, admin: User, marketId: number, paused: boolean): void {
+  if (admin.role !== 'admin') throw forbidden();
+  const m = getRow(db, marketId);
+  if (SETTLED.includes(m.status)) throw conflict('BAD_STATUS', '市场已结算');
+  db.prepare('UPDATE markets SET paused = ? WHERE id = ?').run(paused ? 1 : 0, marketId);
 }
 
 // ---------------------------------------------------------------------------
@@ -216,8 +346,10 @@ export interface TradeRequest {
   minAmount?: number;
 }
 
-function assertTradable(m: MarketRow, now: number): void {
+function assertTradable(db: DB, m: MarketRow, now: number): void {
   if (effectiveStatus(m, now) !== 'OPEN') throw conflict('MARKET_NOT_OPEN', '市场已停止交易');
+  if (isTradingHalted(db)) throw conflict('TRADING_HALTED', '全站交易已暂停');
+  if (m.paused) throw conflict('MARKET_PAUSED', '该市场已被管理员暂停交易');
 }
 
 /** A quote, possibly truncated so the price stays inside the allowed band. */
@@ -255,7 +387,7 @@ function computeQuote(m: MarketRow, req: TradeRequest): BoundedQuote {
 
 export function quoteTrade(db: DB, marketId: number, req: TradeRequest, now: number): BoundedQuote {
   const m = getRow(db, marketId);
-  assertTradable(m, now);
+  assertTradable(db, m, now);
   return computeQuote(m, req);
 }
 
@@ -294,7 +426,7 @@ export function executeTrade(
 ): TradeResult {
   return db.transaction(() => {
     const m = getRow(db, marketId);
-    assertTradable(m, now);
+    assertTradable(db, m, now);
     const pos = getPosition(db, userId, marketId, req.outcome);
     if (req.side === 'SELL' && (req.shares ?? 0) > pos.shares) {
       throw badRequest('INSUFFICIENT_SHARES', '持有份数不足');
@@ -336,9 +468,10 @@ export function executeTrade(
       });
     }
 
+    // q.next is the LMSR state, which includes the pool's virtual shares; store user-held shares only.
     db.prepare('UPDATE markets SET q_yes = ?, q_no = ?, pool = pool + ?, volume = volume + ? WHERE id = ?').run(
-      q.next.qYes,
-      q.next.qNo,
+      q.next.qYes - m.v_yes,
+      q.next.qNo - m.v_no,
       -delta,
       q.amount,
       marketId,
@@ -391,7 +524,7 @@ function settleResolved(db: DB, m: MarketRow, outcome: Outcome, by: number, note
     poolLeft -= w.shares;
   }
   if (poolLeft < 0) throw new Error(`market ${m.id} pool insufficient for payout`);
-  if (poolLeft > 0) applyDelta(db, m.creator_id, poolLeft, 'subsidy_return', `m${m.id}`, now);
+  returnLeftover(db, m, poolLeft, now);
 
   db.prepare(
     `UPDATE markets SET status = 'RESOLVED', resolution = ?, resolved_by = ?, resolved_at = ?,
@@ -459,7 +592,7 @@ export function cancelMarket(db: DB, user: User, marketId: number, note: string,
       if (refund > 0) applyDelta(db, r.user_id, refund, 'cancel_refund', `m${m.id}`, now);
       poolLeft -= refund;
     }
-    if (poolLeft > 0) applyDelta(db, m.creator_id, poolLeft, 'subsidy_return', `m${m.id}`, now);
+    returnLeftover(db, m, poolLeft, now);
 
     db.prepare(
       `UPDATE markets SET status = 'CANCELLED', resolved_by = ?, resolved_at = ?, resolution_note = ?,
@@ -554,7 +687,7 @@ export function leaderboard(db: DB, limit = 50) {
       `SELECT u.id, u.username, u.balance,
          COALESCE((SELECT SUM(delta) FROM ledger l WHERE l.user_id = u.id AND l.reason IN ('signup', 'checkin')), 0) AS granted,
          COALESCE((SELECT SUM(subsidy) FROM markets m WHERE m.creator_id = u.id AND m.status NOT IN ('RESOLVED', 'CANCELLED')), 0) AS locked
-       FROM users u`,
+       FROM users u WHERE u.username != '__house__'`,
     )
     .all() as { id: number; username: string; balance: number; granted: number; locked: number }[];
   const positions = db

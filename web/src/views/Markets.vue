@@ -81,6 +81,7 @@ onUnmounted(() => off?.());
       <ProbBar v-if="m.status !== 'CANCELLED'" :p="m.priceYes" />
       <div class="meta row small muted">
         <span class="badge" :class="m.status">{{ STATUS_LABEL[m.status] }}</span>
+        <span v-if="m.paused && m.status === 'OPEN'" class="badge CLOSED">已暂停</span>
         <span class="num">成交 {{ pts(m.volume) }}</span>
         <div class="spacer" />
         <span v-if="m.status === 'OPEN'">{{ relative(m.closeAt) }}截止</span>

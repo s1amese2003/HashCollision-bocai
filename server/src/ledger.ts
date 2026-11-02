@@ -1,4 +1,5 @@
 import type { DB } from './db.js';
+import { cost } from './market/lmsr.js';
 import { badRequest, conflict } from './errors.js';
 
 export type LedgerReason =
@@ -8,7 +9,8 @@ export type LedgerReason =
   | 'subsidy'
   | 'payout'
   | 'subsidy_return'
-  | 'cancel_refund';
+  | 'cancel_refund'
+  | 'house_mint';
 
 /**
  * Change a user's balance and append a journal entry. Must be called inside a
@@ -66,7 +68,7 @@ export function reconcile(db: DB): ReconcileReport {
   const marketMismatches: ReconcileReport['marketMismatches'] = [];
   const rows = db
     .prepare(
-      `SELECT m.id, m.status, m.q_yes, m.q_no, m.pool,
+      `SELECT m.id, m.status, m.q_yes, m.q_no, m.pool, m.b, m.v_yes, m.v_no,
          COALESCE((SELECT SUM(shares) FROM positions p WHERE p.market_id = m.id AND outcome = 'YES'), 0) AS pos_yes,
          COALESCE((SELECT SUM(shares) FROM positions p WHERE p.market_id = m.id AND outcome = 'NO'), 0) AS pos_no
        FROM markets m`,
@@ -77,6 +79,9 @@ export function reconcile(db: DB): ReconcileReport {
     q_yes: number;
     q_no: number;
     pool: number;
+    b: number;
+    v_yes: number;
+    v_no: number;
     pos_yes: number;
     pos_no: number;
   }[];
@@ -91,6 +96,14 @@ export function reconcile(db: DB): ReconcileReport {
     // Pool must always be able to pay every winning share.
     if (!settled && r.pool < Math.max(r.q_yes, r.q_no)) {
       marketMismatches.push({ marketId: r.id, problem: 'pool cannot cover worst-case payout' });
+    }
+    // Stronger: pool must cover any future sequence of trades (LMSR loss bound).
+    // pool - C(q + v) + min(v) never decreases across trades; allow 1 unit of float noise.
+    if (!settled) {
+      const c = cost({ b: r.b, qYes: r.q_yes + r.v_yes, qNo: r.q_no + r.v_no });
+      if (r.pool - c + Math.min(r.v_yes, r.v_no) < -1) {
+        marketMismatches.push({ marketId: r.id, problem: 'pool below LMSR loss bound' });
+      }
     }
   }
 
