@@ -19,6 +19,8 @@ export interface SiteConfig {
   minSubsidy: number;
   maxSubsidy: number;
   houseSubsidy: number;
+  feeBps: number;
+  positionCapB: number;
   disputeWindowMs: number;
 }
 
@@ -36,6 +38,8 @@ export interface Market {
   subsidy: number;
   houseSubsidy: number;
   paused: boolean;
+  fees: number;
+  positionCap: number | null;
   volume: number;
   closeAt: number;
   proposedOutcome: Outcome | null;
@@ -72,8 +76,13 @@ export interface Quote {
   priceYesBefore: number;
   priceYesAfter: number;
   avgPrice: number;
-  /** True when the trade was truncated to keep the price within 1%-99%. */
+  /** True when the trade was truncated (price band or position cap). */
   capped: boolean;
+  cappedBy: 'PRICE' | 'POSITION' | null;
+  /** Fee paid into the pool, in units. */
+  fee: number;
+  /** What the user actually pays (BUY: amount + fee) or receives (SELL: amount - fee). */
+  total: number;
 }
 
 export interface LiquidityQuote {

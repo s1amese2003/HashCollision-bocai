@@ -16,7 +16,7 @@ let app: App;
 beforeEach(async () => {
   clock = Date.UTC(2026, 10, 1, 4, 0, 0);
   // These tests were written for creator-only liquidity; platform liquidity is covered in features.test.ts.
-  cfg = loadConfig({ dbPath: ':memory:', adminUsernames: ['admin'], webDir: '', houseSubsidy: 0 });
+  cfg = loadConfig({ dbPath: ':memory:', adminUsernames: ['admin'], webDir: '', houseSubsidy: 0, feeBps: 0, positionCapB: 0 });
   db = openDb(':memory:');
   app = await buildApp({ cfg, db, now: () => clock, rateLimit: false });
 });

@@ -50,6 +50,7 @@ export interface MarketRow {
   v_yes: number;
   v_no: number;
   paused: number;
+  fees: number;
 }
 
 export interface MarketView {
@@ -68,6 +69,10 @@ export interface MarketView {
   /** Platform-funded liquidity, in units. */
   houseSubsidy: number;
   paused: boolean;
+  /** Trading fees collected into the pool, in units. */
+  fees: number;
+  /** Max shares one user may hold per side, or null if uncapped. */
+  positionCap: number | null;
   volume: number;
   closeAt: number;
   proposedOutcome: Outcome | null;
@@ -112,6 +117,8 @@ export function toView(
     subsidy: m.subsidy,
     houseSubsidy: m.house_subsidy,
     paused: m.paused === 1,
+    fees: m.fees,
+    positionCap: Number.isFinite(positionCap(cfg, m)) ? positionCap(cfg, m) : null,
     volume: m.volume,
     closeAt: m.close_at,
     proposedOutcome: m.proposed_outcome,
@@ -352,43 +359,101 @@ function assertTradable(db: DB, m: MarketRow, now: number): void {
   if (m.paused) throw conflict('MARKET_PAUSED', '该市场已被管理员暂停交易');
 }
 
-/** A quote, possibly truncated so the price stays inside the allowed band. */
-export type BoundedQuote = Quote & { capped: boolean };
+/**
+ * A quote after applying the price band, the per-user position cap and the fee.
+ *
+ * `amount` is the LMSR cost (BUY) or proceeds (SELL) and moves the price;
+ * `fee` goes into the market pool; `total` is what the user actually pays
+ * (BUY: amount + fee) or receives (SELL: amount - fee).
+ */
+export type BoundedQuote = Quote & {
+  capped: boolean;
+  cappedBy: 'PRICE' | 'POSITION' | null;
+  fee: number;
+  total: number;
+};
 
 const OUTCOME_CN: Record<Outcome, string> = { YES: '是', NO: '否' };
 const CAP_PCT = Math.round(PRICE_CAP * 100);
 
-function computeQuote(m: MarketRow, req: TradeRequest): BoundedQuote {
+export function feeRate(cfg: Config): number {
+  return cfg.feeBps / 10_000;
+}
+
+/** Fee on an LMSR amount, rounded up (in the pool's favour). */
+function feeOn(cfg: Config, amount: number): number {
+  return Math.ceil(amount * feeRate(cfg));
+}
+
+/** Max shares one user may hold on one side of a market, or Infinity if uncapped. */
+export function positionCap(cfg: Config, m: { b: number }): number {
+  return cfg.positionCapB > 0 ? Math.floor(m.b * cfg.positionCapB) : Infinity;
+}
+
+/**
+ * @param held shares of `req.outcome` the user already holds (0 when quoting anonymously)
+ */
+function computeQuote(cfg: Config, m: MarketRow, req: TradeRequest, held: number): BoundedQuote {
   const s = pool(m);
   try {
     if (req.side === 'BUY') {
       if (!req.amount) throw badRequest('BAD_AMOUNT', '请输入买入金额');
-      const limit = maxBuyShares(s, req.outcome);
-      if (limit < 1) {
+      const priceLimit = maxBuyShares(s, req.outcome);
+      if (priceLimit < 1) {
         throw badRequest('PRICE_LIMIT', `「${OUTCOME_CN[req.outcome]}」的价格已达 ${CAP_PCT}% 上限，暂时不能继续买入`);
       }
-      const q = quoteBuyAmount(s, req.outcome, req.amount);
-      if (q.shares <= limit) return { ...q, capped: false };
-      return { ...quoteBuyShares(s, req.outcome, limit), capped: true };
+      const posLimit = positionCap(cfg, m) - held;
+      if (posLimit < 1) {
+        throw badRequest('POSITION_LIMIT', `你在这个市场的「${OUTCOME_CN[req.outcome]}」持仓已达上限`);
+      }
+      const limit = Math.min(priceLimit, posLimit);
+      const cappedBy = posLimit < priceLimit ? 'POSITION' : 'PRICE';
+
+      // The budget covers LMSR cost + fee; shrink until rounding fits.
+      let budget = Math.floor(req.amount / (1 + feeRate(cfg)));
+      for (;;) {
+        let q = quoteBuyAmount(s, req.outcome, budget);
+        let capped = false;
+        if (q.shares > limit) {
+          q = quoteBuyShares(s, req.outcome, limit);
+          capped = true;
+        }
+        const fee = feeOn(cfg, q.amount);
+        if (q.amount + fee <= req.amount) {
+          return { ...q, capped, cappedBy: capped ? cappedBy : null, fee, total: q.amount + fee };
+        }
+        budget -= 1;
+      }
     }
+
     if (!req.shares) throw badRequest('BAD_SHARES', '请输入卖出份数');
     const other: Outcome = req.outcome === 'YES' ? 'NO' : 'YES';
     const limit = maxSellShares(s, req.outcome);
     if (limit < 1) {
       throw badRequest('PRICE_LIMIT', `「${OUTCOME_CN[other]}」的价格已达 ${CAP_PCT}% 上限，暂时不能继续卖出`);
     }
-    if (req.shares <= limit) return { ...quoteSellShares(s, req.outcome, req.shares), capped: false };
-    return { ...quoteSellShares(s, req.outcome, limit), capped: true };
+    const capped = req.shares > limit;
+    const q = quoteSellShares(s, req.outcome, capped ? limit : req.shares);
+    const fee = Math.min(feeOn(cfg, q.amount), q.amount);
+    return { ...q, capped, cappedBy: capped ? 'PRICE' : null, fee, total: q.amount - fee };
   } catch (e) {
     if (e instanceof LmsrError) throw badRequest('BAD_TRADE', '数量无效或太小');
     throw e;
   }
 }
 
-export function quoteTrade(db: DB, marketId: number, req: TradeRequest, now: number): BoundedQuote {
+export function quoteTrade(
+  db: DB,
+  cfg: Config,
+  marketId: number,
+  req: TradeRequest,
+  now: number,
+  userId?: number,
+): BoundedQuote {
   const m = getRow(db, marketId);
   assertTradable(db, m, now);
-  return computeQuote(m, req);
+  const held = userId === undefined ? 0 : getPosition(db, userId, marketId, req.outcome).shares;
+  return computeQuote(cfg, m, req, held);
 }
 
 interface PositionRow {
@@ -419,6 +484,7 @@ export interface TradeResult {
 
 export function executeTrade(
   db: DB,
+  cfg: Config,
   userId: number,
   marketId: number,
   req: TradeRequest,
@@ -432,32 +498,33 @@ export function executeTrade(
       throw badRequest('INSUFFICIENT_SHARES', '持有份数不足');
     }
 
-    const q = computeQuote(m, req);
+    const q = computeQuote(cfg, m, req, pos.shares);
     if (req.side === 'BUY' && req.minShares !== undefined && q.shares < req.minShares) {
       throw conflict('SLIPPAGE', '价格已变动，请重新确认');
     }
     if (req.side === 'SELL') {
-      if (q.amount <= 0) throw badRequest('BAD_TRADE', '卖出数量太小');
-      if (req.minAmount !== undefined && q.amount < req.minAmount) {
+      if (q.total <= 0) throw badRequest('BAD_TRADE', '卖出数量太小');
+      if (req.minAmount !== undefined && q.total < req.minAmount) {
         throw conflict('SLIPPAGE', '价格已变动，请重新确认');
       }
     }
 
     const tr = db
       .prepare(
-        `INSERT INTO trades (market_id, user_id, outcome, side, shares, amount, price_before, price_after, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO trades (market_id, user_id, outcome, side, shares, amount, fee, price_before, price_after, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
-      .run(marketId, userId, q.outcome, q.side, q.shares, q.amount, q.priceYesBefore, q.priceYesAfter, now);
+      .run(marketId, userId, q.outcome, q.side, q.shares, q.amount, q.fee, q.priceYesBefore, q.priceYesAfter, now);
     const tradeId = Number(tr.lastInsertRowid);
 
-    const delta = q.side === 'BUY' ? -q.amount : q.amount;
+    // User's cash flow: pays amount + fee on a buy, receives amount - fee on a sell.
+    const delta = q.side === 'BUY' ? -q.total : q.total;
     const balance = applyDelta(db, userId, delta, 'trade', `t${tradeId}`, now);
 
     if (q.side === 'BUY') {
       setPosition(db, userId, marketId, q.outcome, {
         shares: pos.shares + q.shares,
-        cost_basis: pos.cost_basis + q.amount,
+        cost_basis: pos.cost_basis + q.total,
       });
     } else {
       const remaining = pos.shares - q.shares;
@@ -469,13 +536,10 @@ export function executeTrade(
     }
 
     // q.next is the LMSR state, which includes the pool's virtual shares; store user-held shares only.
-    db.prepare('UPDATE markets SET q_yes = ?, q_no = ?, pool = pool + ?, volume = volume + ? WHERE id = ?').run(
-      q.next.qYes - m.v_yes,
-      q.next.qNo - m.v_no,
-      -delta,
-      q.amount,
-      marketId,
-    );
+    // The pool receives the user's whole cash flow, so fees stay in it.
+    db.prepare(
+      'UPDATE markets SET q_yes = ?, q_no = ?, pool = pool + ?, volume = volume + ?, fees = fees + ? WHERE id = ?',
+    ).run(q.next.qYes - m.v_yes, q.next.qNo - m.v_no, -delta, q.amount, q.fee, marketId);
     return { tradeId, quote: q, balance };
   })();
 }
@@ -581,7 +645,7 @@ export function cancelMarket(db: DB, user: User, marketId: number, note: string,
 
     const spends = db
       .prepare(
-        `SELECT user_id, SUM(CASE side WHEN 'BUY' THEN amount ELSE -amount END) AS net
+        `SELECT user_id, SUM(CASE side WHEN 'BUY' THEN amount + fee ELSE -(amount - fee) END) AS net
          FROM trades WHERE market_id = ? GROUP BY user_id HAVING net > 0`,
       )
       .all(m.id) as { user_id: number; net: number }[];

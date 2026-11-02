@@ -107,6 +107,11 @@ const MIGRATIONS: string[] = [
   INSERT OR IGNORE INTO users (username, password_hash, role, created_at)
   VALUES ('__house__', '!', 'user', CAST(strftime('%s', 'now') AS INTEGER) * 1000);
   `,
+  `
+  -- Trading fee, paid into the market pool. trades.amount stays the LMSR cost/proceeds.
+  ALTER TABLE trades ADD COLUMN fee INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE markets ADD COLUMN fees INTEGER NOT NULL DEFAULT 0;
+  `,
 ];
 
 export const HOUSE_USERNAME = '__house__';

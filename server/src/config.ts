@@ -27,6 +27,10 @@ export interface Config {
   maxSubsidy: number;
   /** Liquidity the platform adds to every new market on top of the creator's subsidy. */
   houseSubsidy: number;
+  /** Trading fee in basis points of the LMSR amount (200 = 2%), paid into the pool. */
+  feeBps: number;
+  /** Per-user, per-side share cap as a multiple of b (0 = no cap). */
+  positionCapB: number;
   /** How long a creator's proposed resolution can be overridden by an admin. */
   disputeWindowMs: number;
   sessionTtlMs: number;
@@ -49,6 +53,8 @@ export function loadConfig(overrides: Partial<Config> = {}): Config {
     minSubsidy: int('MIN_SUBSIDY', 50) * SCALE,
     maxSubsidy: int('MAX_SUBSIDY', 2000) * SCALE,
     houseSubsidy: int('HOUSE_SUBSIDY', 500) * SCALE,
+    feeBps: int('TRADE_FEE_BPS', 200),
+    positionCapB: int('POSITION_CAP_B', 2),
     disputeWindowMs: int('DISPUTE_WINDOW_HOURS', 24) * 3600_000,
     sessionTtlMs: int('SESSION_TTL_DAYS', 30) * 86400_000,
     ...overrides,

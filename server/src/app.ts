@@ -118,6 +118,9 @@ function quoteView(q: BoundedQuote) {
     priceYesAfter: q.priceYesAfter,
     avgPrice: q.avgPrice,
     capped: q.capped,
+    cappedBy: q.cappedBy,
+    fee: q.fee,
+    total: q.total,
   };
 }
 
@@ -220,6 +223,8 @@ export async function buildApp(deps: AppDeps): Promise<App> {
         minSubsidy: cfg.minSubsidy,
         maxSubsidy: cfg.maxSubsidy,
         houseSubsidy: cfg.houseSubsidy,
+        feeBps: cfg.feeBps,
+        positionCapB: cfg.positionCapB,
         disputeWindowMs: cfg.disputeWindowMs,
       },
       tradingHalted: isTradingHalted(db),
@@ -266,14 +271,14 @@ export async function buildApp(deps: AppDeps): Promise<App> {
   app.post('/api/markets/:id/quote', tradeLimit, async (req) => {
     const { id } = idParam.parse(req.params);
     const body = tradeBody.parse(req.body);
-    return { quote: quoteView(quoteTrade(db, id, body, now())) };
+    return { quote: quoteView(quoteTrade(db, cfg, id, body, now(), currentUser(req)?.id)) };
   });
 
   app.post('/api/markets/:id/trade', tradeLimit, async (req) => {
     const u = requireUser(req);
     const { id } = idParam.parse(req.params);
     const body = tradeBody.parse(req.body);
-    const r = executeTrade(db, u.id, id, body, now());
+    const r = executeTrade(db, cfg, u.id, id, body, now());
     emitMarket(id);
     hub.broadcast({
       type: 'trade',
@@ -281,7 +286,7 @@ export async function buildApp(deps: AppDeps): Promise<App> {
       username: u.username,
       outcome: r.quote.outcome,
       side: r.quote.side,
-      amount: r.quote.amount,
+      amount: r.quote.total,
       priceAfter: r.quote.priceYesAfter,
     });
     return { tradeId: r.tradeId, quote: quoteView(r.quote), balance: r.balance };
