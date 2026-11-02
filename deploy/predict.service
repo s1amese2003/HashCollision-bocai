@@ -1,0 +1,22 @@
+[Unit]
+Description=Predict - points-only prediction market
+After=network.target
+
+[Service]
+Type=simple
+User=predict
+Group=predict
+WorkingDirectory=/opt/HashCollision-bocai/server
+EnvironmentFile=/etc/predict.env
+ExecStart=/opt/node22/bin/node dist/index.js
+Restart=on-failure
+RestartSec=3
+# Hardening: the service only needs to write its database directory.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/predict
+
+[Install]
+WantedBy=multi-user.target

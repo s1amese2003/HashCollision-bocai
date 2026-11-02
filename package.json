@@ -1,0 +1,12 @@
+{
+  "name": "hashcollision-bocai",
+  "private": true,
+  "scripts": {
+    "build": "pnpm --filter web build && pnpm --filter @pm/server build",
+    "test": "pnpm -r test",
+    "typecheck": "pnpm -r typecheck"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}
