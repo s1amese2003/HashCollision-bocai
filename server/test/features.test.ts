@@ -161,6 +161,23 @@ describe('platform liquidity', () => {
   });
 });
 
+describe('liquidity price band', () => {
+  it('allows adding liquidity at ~85% but refuses at ~91%', async () => {
+    const creator = await signup('alice');
+    const admin = await signup('admin');
+    const id = await newMarket(creator, 100);
+    const quote = () => call('POST', `/api/markets/${id}/liquidity/quote`, admin, { amount: 100 * SCALE });
+
+    db.prepare('UPDATE markets SET v_yes = CAST(b * 1.7 AS INTEGER) WHERE id = ?').run(id); // p ≈ 0.845
+    expect((await quote()).status).toBe(200);
+
+    db.prepare('UPDATE markets SET v_yes = CAST(b * 2.3 AS INTEGER) WHERE id = ?').run(id); // p ≈ 0.909
+    const r = await quote();
+    expect(r.status).toBe(409);
+    expect(r.body.error.code).toBe('PRICE_OUT_OF_BAND');
+  });
+});
+
 describe('pausing', () => {
   it('admin can pause and resume a single market', async () => {
     const creator = await signup('alice');

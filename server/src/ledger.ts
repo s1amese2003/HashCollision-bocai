@@ -10,7 +10,10 @@ export type LedgerReason =
   | 'payout'
   | 'subsidy_return'
   | 'cancel_refund'
-  | 'house_mint';
+  | 'house_mint'
+  // Manual corrections by an operator (see server/scripts).
+  | 'trade_revert'
+  | 'liquidity_revert';
 
 /**
  * Change a user's balance and append a journal entry. Must be called inside a

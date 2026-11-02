@@ -6,7 +6,8 @@
  *   predictctl halt on|off          # pause / resume trading on every market
  *   predictctl pause <id> on|off    # pause / resume one market
  *   predictctl reconcile
- *   predictctl liquidity <id> <points> [--yes]   # platform adds liquidity (dry run without --yes)
+ *   predictctl liquidity <id> <points>                    # dry run: shows the deposit
+ *   predictctl liquidity <id> <points> --max <deposit>    # execute; refuses if the deposit exceeds <deposit>
  *
  * Changes take effect immediately: the server reads these flags on every trade.
  */
@@ -27,7 +28,7 @@ function onOff(v: string | undefined): boolean {
 }
 
 function usage(): never {
-  console.error('usage: predictctl status | halt on|off | pause <marketId> on|off | reconcile | liquidity <marketId> <points> [--yes]');
+  console.error('usage: predictctl status | halt on|off | pause <marketId> on|off | reconcile | liquidity <marketId> <points> [--max <deposit>]');
   process.exit(2);
 }
 
@@ -44,6 +45,7 @@ function status() {
   }
 }
 
+try {
 switch (cmd) {
   case 'status':
     status();
@@ -75,13 +77,17 @@ switch (cmd) {
     console.log(
       `市场 #${id}: b ${fmt(q.bBefore)} -> ${fmt(q.bAfter)}，平台需出资 ${fmt(q.deposit)} 积分，价格保持 ${(q.priceYes * 100).toFixed(1)}%`,
     );
-    if (!args.includes('--yes')) {
-      console.log('（试算，未执行。确认请加 --yes）');
+    const maxIdx = args.indexOf('--max');
+    if (maxIdx < 0) {
+      // Execution is a separate, deliberate step: the operator must re-run with the deposit they accept.
+      console.log(`（试算，未执行。确认请运行：predictctl liquidity ${id} ${points} --max ${Math.ceil(q.deposit / SCALE)}）`);
       break;
     }
+    const maxPoints = Number(args[maxIdx + 1]);
+    if (!(maxPoints > 0)) usage();
     // The operator CLI acts with admin authority; the user record is only used for the role check.
     const operator = { id: 0, username: 'predictctl', role: 'admin' } as User;
-    const done = addLiquidity(db, operator, id, extra, Date.now(), q.deposit);
+    const done = addLiquidity(db, operator, id, extra, Date.now(), Math.round(maxPoints * SCALE));
     console.log(`已执行：b = ${fmt(done.bAfter)}，平台出资 ${fmt(done.deposit)} 积分`);
     break;
   }
@@ -92,5 +98,13 @@ switch (cmd) {
   }
   default:
     usage();
+}
+} catch (e) {
+  // Business errors (AppError) carry a readable message; anything else is a bug worth a stack.
+  if (e instanceof Error && e.name === 'AppError') {
+    console.error(`失败：${e.message}`);
+    process.exit(1);
+  }
+  throw e;
 }
 db.close();

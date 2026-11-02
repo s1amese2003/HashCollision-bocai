@@ -271,11 +271,21 @@ export interface LiquidityQuote {
  * Adding liquidity near the price band is expensive by design: it lets traders
  * buy the cheap side over a much wider range.
  */
+/**
+ * Liquidity may only be added while the price is within this band. Near the
+ * edges, new depth is mostly a pile of cheap shares on the unlikely side that
+ * the next trader can scoop up at the platform's expense.
+ */
+export const LIQUIDITY_PRICE_BAND = 0.9;
+
 function planLiquidity(m: MarketRow, extra: number): LiquidityQuote & { vYes: number; vNo: number } {
   const s = pool(m);
   const p = priceYes(s);
-  if (p < 1 - PRICE_CAP || p > PRICE_CAP) {
-    throw conflict('PRICE_OUT_OF_BAND', '当前价格超出 1%–99%，等价格回到区间内再追加流动性');
+  if (p < 1 - LIQUIDITY_PRICE_BAND || p > LIQUIDITY_PRICE_BAND) {
+    throw conflict(
+      'PRICE_OUT_OF_BAND',
+      `当前价格 ${(p * 100).toFixed(1)}% 超出 10%–90%，等价格回到区间内再追加流动性`,
+    );
   }
   const bAfter = m.b + Math.floor(extra / Math.LN2);
   if (bAfter <= m.b) throw badRequest('BAD_AMOUNT', '追加数量太小');
