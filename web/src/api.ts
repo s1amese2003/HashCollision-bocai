@@ -245,4 +245,6 @@ export const REASON_LABEL: Record<string, string> = {
   subsidy_return: '补贴返还',
   cancel_refund: '作废退款',
   house_mint: '平台注资',
+  trade_revert: '交易撤回（退款）',
+  liquidity_revert: '流动性撤回',
 };
