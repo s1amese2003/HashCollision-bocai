@@ -4,7 +4,6 @@ import { badRequest, conflict } from './errors.js';
 
 export type LedgerReason =
   | 'signup'
-  | 'checkin'
   | 'trade'
   | 'subsidy'
   | 'payout'

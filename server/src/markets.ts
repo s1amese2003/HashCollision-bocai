@@ -757,7 +757,7 @@ export function leaderboard(db: DB, limit = 50) {
   const users = db
     .prepare(
       `SELECT u.id, u.username, u.balance,
-         COALESCE((SELECT SUM(delta) FROM ledger l WHERE l.user_id = u.id AND l.reason IN ('signup', 'checkin', 'reset')), 0) AS granted,
+         COALESCE((SELECT SUM(delta) FROM ledger l WHERE l.user_id = u.id AND l.reason IN ('signup', 'reset')), 0) AS granted,
          COALESCE((SELECT SUM(subsidy) FROM markets m WHERE m.creator_id = u.id AND m.status NOT IN ('RESOLVED', 'CANCELLED')), 0) AS locked
        FROM users u WHERE u.username != '__house__'`,
     )

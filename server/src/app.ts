@@ -8,9 +8,7 @@ import { resolve } from 'node:path';
 import { z, ZodError } from 'zod';
 import {
   type User,
-  checkin,
   createSession,
-  dayKey,
   deleteSession,
   login,
   purgeExpiredSessions,
@@ -133,13 +131,12 @@ const haltBody = z.object({ halted: z.boolean() });
 const liquidityBody = z.object({ amount: unitsInt, maxDeposit: z.number().int().nonnegative().optional() });
 const listQuery = z.object({ filter: z.enum(['active', 'closed', 'settled', 'all']).default('active') });
 
-function publicUser(u: User, cfg: Config, now: number) {
+function publicUser(u: User) {
   return {
     id: u.id,
     username: u.username,
     role: u.role,
     balance: u.balance,
-    checkedInToday: u.last_checkin_day === dayKey(cfg, now),
   };
 }
 
@@ -227,7 +224,7 @@ export async function buildApp(deps: AppDeps): Promise<App> {
     const t = now();
     const user = await register(db, cfg, body.username, body.password, t);
     setSession(reply, createSession(db, cfg, user.id, t));
-    return { user: publicUser(user, cfg, t) };
+    return { user: publicUser(user) };
   });
 
   app.post('/api/login', strictLimit, async (req, reply) => {
@@ -235,7 +232,7 @@ export async function buildApp(deps: AppDeps): Promise<App> {
     const t = now();
     const user = await login(db, body.username, body.password);
     setSession(reply, createSession(db, cfg, user.id, t));
-    return { user: publicUser(user, cfg, t) };
+    return { user: publicUser(user) };
   });
 
   app.post('/api/logout', async (req, reply) => {
@@ -248,11 +245,10 @@ export async function buildApp(deps: AppDeps): Promise<App> {
   app.get('/api/me', async (req) => {
     const u = currentUser(req);
     return {
-      user: u ? publicUser(u, cfg, now()) : null,
+      user: u ? publicUser(u) : null,
       config: {
         scale: SCALE,
         signupBonus: cfg.signupBonus,
-        checkinBonus: cfg.checkinBonus,
         minSubsidy: cfg.minSubsidy,
         maxSubsidy: cfg.maxSubsidy,
         houseSubsidy: cfg.houseSubsidy,
@@ -268,11 +264,6 @@ export async function buildApp(deps: AppDeps): Promise<App> {
     };
   });
 
-  app.post('/api/checkin', async (req) => {
-    const u = requireUser(req);
-    const t = now();
-    return { user: publicUser(checkin(db, cfg, u.id, t), cfg, t) };
-  });
 
   // --- markets --------------------------------------------------------------
 

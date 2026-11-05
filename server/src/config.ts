@@ -17,11 +17,8 @@ export interface Config {
   cookieSecure: boolean;
   /** Usernames that are granted the admin role on registration/startup. */
   adminUsernames: string[];
-  /** Points granted on signup / daily check-in, in units. */
+  /** Points granted on signup, in units. */
   signupBonus: number;
-  checkinBonus: number;
-  /** Minutes offset from UTC that defines the "day" for check-ins (480 = UTC+8). */
-  dayOffsetMinutes: number;
   /** Subsidy limits for market creation, in units. */
   minSubsidy: number;
   maxSubsidy: number;
@@ -48,8 +45,6 @@ export function loadConfig(overrides: Partial<Config> = {}): Config {
       .map((s) => s.trim().toLowerCase())
       .filter(Boolean),
     signupBonus: int('SIGNUP_BONUS', 100) * SCALE,
-    checkinBonus: int('CHECKIN_BONUS', 100) * SCALE,
-    dayOffsetMinutes: int('DAY_OFFSET_MINUTES', 480),
     minSubsidy: int('MIN_SUBSIDY', 50) * SCALE,
     maxSubsidy: int('MAX_SUBSIDY', 2000) * SCALE,
     houseSubsidy: int('HOUSE_SUBSIDY', 500) * SCALE,

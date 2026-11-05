@@ -77,7 +77,7 @@ function conserved(): boolean {
   const held =
     scalar('SELECT COALESCE(SUM(balance), 0) AS s FROM users') + scalar('SELECT COALESCE(SUM(pool), 0) AS s FROM markets');
   const issued = scalar(
-    `SELECT COALESCE(SUM(delta), 0) AS s FROM ledger WHERE reason IN ('signup', 'checkin', 'house_mint', 'reset')`,
+    `SELECT COALESCE(SUM(delta), 0) AS s FROM ledger WHERE reason IN ('signup', 'house_mint', 'reset')`,
   );
   return held === issued;
 }

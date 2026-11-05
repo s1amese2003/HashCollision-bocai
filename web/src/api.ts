@@ -11,13 +11,11 @@ export interface Me {
   username: string;
   role: 'user' | 'admin';
   balance: number;
-  checkedInToday: boolean;
 }
 
 export interface SiteConfig {
   scale: number;
   signupBonus: number;
-  checkinBonus: number;
   minSubsidy: number;
   maxSubsidy: number;
   houseSubsidy: number;
@@ -207,7 +205,6 @@ export const api = {
   login: (username: string, password: string) =>
     request<{ user: Me }>('POST', '/api/login', { username, password }),
   logout: () => request<{ ok: boolean }>('POST', '/api/logout', {}),
-  checkin: () => request<{ user: Me }>('POST', '/api/checkin', {}),
 
   markets: (filter: string) => request<{ markets: Market[] }>('GET', `/api/markets?filter=${filter}`),
   market: (id: number) => request<MarketDetailData>('GET', `/api/markets/${id}`),
@@ -301,7 +298,6 @@ export const OUTCOME_LABEL: Record<Outcome, string> = { YES: '是', NO: '否' };
 
 export const REASON_LABEL: Record<string, string> = {
   signup: '注册奖励',
-  checkin: '每日签到',
   trade: '交易',
   subsidy: '创建市场补贴',
   payout: '结算兑付',

@@ -70,7 +70,7 @@ function totalPoints(): number {
 function totalGranted(): number {
   return (
     db
-      .prepare(`SELECT COALESCE(SUM(delta), 0) AS s FROM ledger WHERE reason IN ('signup', 'checkin', 'house_mint')`)
+      .prepare(`SELECT COALESCE(SUM(delta), 0) AS s FROM ledger WHERE reason IN ('signup', 'house_mint')`)
       .get() as { s: number }
   ).s;
 }
@@ -90,18 +90,15 @@ describe('auth and check-in', () => {
   });
 
   it('rejects unauthenticated requests and bad input', async () => {
-    expect((await call('POST', '/api/checkin')).status).toBe(401);
+    expect((await call('POST', '/api/markets', undefined, {})).status).toBe(401);
     const r = await call('POST', '/api/register', undefined, { username: 'a', password: '1' });
     expect(r.status).toBe(400);
   });
 
-  it('allows one check-in per day (UTC+8)', async () => {
+  it('has no daily check-in', async () => {
     const c = await signup('bob');
-    expect((await call('POST', '/api/checkin', c)).status).toBe(200);
-    expect((await call('POST', '/api/checkin', c)).status).toBe(400);
-    clock += 12 * HOUR; // 00:00 next day in UTC+8
-    expect((await call('POST', '/api/checkin', c)).status).toBe(200);
-    expect(await balanceOf(c)).toBe(cfg.signupBonus + 2 * cfg.checkinBonus);
+    expect((await call('POST', '/api/checkin', c)).status).toBe(404);
+    expect(await balanceOf(c)).toBe(cfg.signupBonus);
   });
 
   it('logout invalidates the session', async () => {

@@ -60,7 +60,7 @@ const scalar = (sql: string, ...args: unknown[]) => (db.prepare(sql).get(...args
 /** Every point in existence is either in someone's balance or in a market pool. */
 function conserved(): boolean {
   const held = scalar('SELECT COALESCE(SUM(balance), 0) AS s FROM users') + scalar('SELECT COALESCE(SUM(pool), 0) AS s FROM markets');
-  const issued = scalar(`SELECT COALESCE(SUM(delta), 0) AS s FROM ledger WHERE reason IN ('signup', 'checkin', 'house_mint')`);
+  const issued = scalar(`SELECT COALESCE(SUM(delta), 0) AS s FROM ledger WHERE reason IN ('signup', 'house_mint', 'reset')`);
   return held === issued;
 }
 

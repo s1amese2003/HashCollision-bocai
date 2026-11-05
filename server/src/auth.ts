@@ -2,7 +2,7 @@ import { randomBytes, scrypt as scryptCb, timingSafeEqual } from 'node:crypto';
 import { promisify } from 'node:util';
 import type { Config } from './config.js';
 import type { DB } from './db.js';
-import { badRequest, conflict, unauthorized } from './errors.js';
+import { conflict, unauthorized } from './errors.js';
 import { applyDelta } from './ledger.js';
 
 const scrypt = promisify(scryptCb) as (pw: string, salt: Buffer, len: number) => Promise<Buffer>;
@@ -26,11 +26,10 @@ export interface User {
   username: string;
   role: 'user' | 'admin';
   balance: number;
-  last_checkin_day: string | null;
   created_at: number;
 }
 
-const USER_COLS = 'id, username, role, balance, last_checkin_day, created_at';
+const USER_COLS = 'id, username, role, balance, created_at';
 
 export function getUser(db: DB, id: number): User | undefined {
   return db.prepare(`SELECT ${USER_COLS} FROM users WHERE id = ?`).get(id) as User | undefined;
@@ -95,22 +94,6 @@ export function deleteSession(db: DB, token: string): void {
 
 export function purgeExpiredSessions(db: DB, now: number): void {
   db.prepare('DELETE FROM sessions WHERE expires_at <= ?').run(now);
-}
-
-/** Calendar day string (YYYY-MM-DD) in the configured timezone offset. */
-export function dayKey(cfg: Config, now: number): string {
-  return new Date(now + cfg.dayOffsetMinutes * 60_000).toISOString().slice(0, 10);
-}
-
-export function checkin(db: DB, cfg: Config, userId: number, now: number): User {
-  const day = dayKey(cfg, now);
-  db.transaction(() => {
-    const u = getUser(db, userId)!;
-    if (u.last_checkin_day === day) throw badRequest('ALREADY_CHECKED_IN', '今天已经签到过了');
-    applyDelta(db, userId, cfg.checkinBonus, 'checkin', day, now);
-    db.prepare('UPDATE users SET last_checkin_day = ? WHERE id = ?').run(day, userId);
-  })();
-  return getUser(db, userId)!;
 }
 
 /** Promote configured admin usernames that registered before being listed. */

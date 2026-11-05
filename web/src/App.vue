@@ -5,16 +5,6 @@ import { store, toast, toastError } from './store';
 
 const router = useRouter();
 
-async function checkin() {
-  try {
-    const r = await api.checkin();
-    store.me = r.user;
-    toast(`签到成功，获得 ${pts(store.config?.checkinBonus ?? 0)} 积分`);
-  } catch (e) {
-    toastError(e);
-  }
-}
-
 async function toggleHalt() {
   try {
     const r = await api.halt(!store.tradingHalted);
@@ -47,7 +37,6 @@ async function logout() {
       <div class="spacer" />
       <template v-if="store.loaded">
         <template v-if="store.me">
-          <button v-if="!store.me.checkedInToday" class="ghost small" @click="checkin">签到</button>
           <RouterLink to="/portfolio" class="balance num" title="可用积分">
             {{ pts(store.me.balance) }} <span class="muted small">积分</span>
           </RouterLink>

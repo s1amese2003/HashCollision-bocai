@@ -20,7 +20,7 @@ onMounted(async () => {
 <template>
   <div class="card board">
     <h1>排行榜</h1>
-    <p class="muted small">盈利 = 当前总资产（积分 + 持仓现值 + 锁定的补贴）− 系统累计发放的积分。签到不算本事，预测准才算。</p>
+    <p class="muted small">盈利 = 当前总资产（积分 + 持仓现值 + 锁定的补贴）− 系统累计发放的积分。</p>
     <div v-if="loading" class="empty">加载中…</div>
     <div v-else-if="rows.length === 0" class="empty">还没有用户</div>
     <table v-else>

@@ -66,7 +66,7 @@ const scalar = (sql: string, ...args: unknown[]) => (db.prepare(sql).get(...args
 function conserved(): boolean {
   const held =
     scalar('SELECT COALESCE(SUM(balance), 0) AS s FROM users') + scalar('SELECT COALESCE(SUM(pool), 0) AS s FROM markets');
-  const issued = scalar(`SELECT COALESCE(SUM(delta), 0) AS s FROM ledger WHERE reason IN ('signup', 'checkin', 'house_mint')`);
+  const issued = scalar(`SELECT COALESCE(SUM(delta), 0) AS s FROM ledger WHERE reason IN ('signup', 'house_mint', 'reset')`);
   return held === issued;
 }
 
@@ -107,7 +107,7 @@ describe('position cap', () => {
     // Top the whale up (journaled like a grant) so they can afford to reach the cap.
     db.prepare('UPDATE users SET balance = balance + ? WHERE username = ?').run(2000 * SCALE, 'bob');
     db.prepare(`INSERT INTO ledger (user_id, delta, balance_after, reason, ref_id, created_at)
-                SELECT id, ?, balance, 'checkin', 'test-topup', 0 FROM users WHERE username = 'bob'`).run(2000 * SCALE);
+                SELECT id, ?, balance, 'reset', 'test-topup', 0 FROM users WHERE username = 'bob'`).run(2000 * SCALE);
 
     let held = 0;
     for (let i = 0; i < 5; i++) {
