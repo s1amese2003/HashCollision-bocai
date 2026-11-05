@@ -1,8 +1,28 @@
 import type { User } from './auth.js';
 import type { Config } from './config.js';
-import { type DB, houseId, isTradingHalted } from './db.js';
+import { type DB, houseId } from './db.js';
 import { badRequest, conflict, forbidden, notFound } from './errors.js';
 import { applyDelta } from './ledger.js';
+import {
+  type MarketKind,
+  type MarketRow,
+  type MarketStatus,
+  SETTLED,
+  assertTradable,
+  effectiveStatus,
+  getRow,
+  validateCloseAt,
+} from './market-core.js';
+import {
+  type OddsOptionRow,
+  type OddsOptionView,
+  assertOptionOf,
+  hasBets,
+  loadOptions,
+  optionViews,
+  refundOdds,
+  settleOdds,
+} from './odds.js';
 import {
   LmsrError,
   PRICE_CAP,
@@ -21,40 +41,11 @@ import {
   requiredSubsidy,
 } from './market/lmsr.js';
 
-export type MarketStatus = 'OPEN' | 'CLOSED' | 'PROPOSED' | 'RESOLVED' | 'CANCELLED';
-
-export interface MarketRow {
-  id: number;
-  creator_id: number;
-  title: string;
-  description: string;
-  rules: string;
-  source_url: string | null;
-  b: number;
-  q_yes: number;
-  q_no: number;
-  subsidy: number;
-  pool: number;
-  volume: number;
-  status: MarketStatus;
-  close_at: number;
-  proposed_outcome: Outcome | null;
-  proposed_at: number | null;
-  proposal_note: string | null;
-  resolution: Outcome | null;
-  resolved_by: number | null;
-  resolved_at: number | null;
-  resolution_note: string | null;
-  created_at: number;
-  house_subsidy: number;
-  v_yes: number;
-  v_no: number;
-  paused: number;
-  fees: number;
-}
+export type { MarketKind, MarketRow, MarketStatus } from './market-core.js';
 
 export interface MarketView {
   id: number;
+  kind: MarketKind;
   creatorId: number;
   creatorName: string;
   title: string;
@@ -62,15 +53,14 @@ export interface MarketView {
   rules: string;
   sourceUrl: string | null;
   status: MarketStatus;
-  priceYes: number;
+  /** LMSR only (null for ODDS). */
+  priceYes: number | null;
   b: number;
-  /** Creator's subsidy, in units. */
+  /** LMSR: creator's subsidy. ODDS: creator's deposit. In units. */
   subsidy: number;
   /** Platform-funded liquidity, in units. */
   houseSubsidy: number;
   paused: boolean;
-  /** Trading fees collected into the pool, in units. */
-  fees: number;
   /** Max shares one user may hold per side, or null if uncapped. */
   positionCap: number | null;
   volume: number;
@@ -84,27 +74,27 @@ export interface MarketView {
   resolvedAt: number | null;
   resolutionNote: string | null;
   createdAt: number;
+  /** ODDS only (null for LMSR). */
+  options: OddsOptionView[] | null;
+  proposedOptionId: number | null;
+  resolvedOptionId: number | null;
 }
-
-const SETTLED: MarketStatus[] = ['RESOLVED', 'CANCELLED'];
 
 /** LMSR state: user-held shares plus the pool's virtual shares. */
 function pool(m: MarketRow): PoolState {
   return { b: m.b, qYes: m.q_yes + m.v_yes, qNo: m.q_no + m.v_no };
 }
 
-/** OPEN markets past their close time are reported as CLOSED even before the sweeper runs. */
-function effectiveStatus(m: MarketRow, now: number): MarketStatus {
-  return m.status === 'OPEN' && now >= m.close_at ? 'CLOSED' : m.status;
-}
-
 export function toView(
   m: MarketRow & { creator_name: string },
   cfg: Config,
   now: number,
+  options: OddsOptionRow[] = [],
 ): MarketView {
+  const lmsr = m.kind === 'LMSR';
   return {
     id: m.id,
+    kind: m.kind,
     creatorId: m.creator_id,
     creatorName: m.creator_name,
     title: m.title,
@@ -112,13 +102,12 @@ export function toView(
     rules: m.rules,
     sourceUrl: m.source_url,
     status: effectiveStatus(m, now),
-    priceYes: priceYes(pool(m)),
+    priceYes: lmsr ? priceYes(pool(m)) : null,
     b: m.b,
     subsidy: m.subsidy,
     houseSubsidy: m.house_subsidy,
     paused: m.paused === 1,
-    fees: m.fees,
-    positionCap: Number.isFinite(positionCap(cfg, m)) ? positionCap(cfg, m) : null,
+    positionCap: lmsr && Number.isFinite(positionCap(cfg, m)) ? positionCap(cfg, m) : null,
     volume: m.volume,
     closeAt: m.close_at,
     proposedOutcome: m.proposed_outcome,
@@ -129,23 +118,20 @@ export function toView(
     resolvedAt: m.resolved_at,
     resolutionNote: m.resolution_note,
     createdAt: m.created_at,
+    options: lmsr ? null : optionViews(m, options),
+    proposedOptionId: m.proposed_option,
+    resolvedOptionId: m.resolved_option,
   };
 }
 
 const VIEW_SQL = `SELECT m.*, u.username AS creator_name FROM markets m JOIN users u ON u.id = m.creator_id`;
-
-function getRow(db: DB, id: number): MarketRow {
-  const m = db.prepare('SELECT * FROM markets WHERE id = ?').get(id) as MarketRow | undefined;
-  if (!m) throw notFound('市场不存在');
-  return m;
-}
 
 export function getMarket(db: DB, cfg: Config, id: number, now: number): MarketView {
   const m = db.prepare(`${VIEW_SQL} WHERE m.id = ?`).get(id) as
     | (MarketRow & { creator_name: string })
     | undefined;
   if (!m) throw notFound('市场不存在');
-  return toView(m, cfg, now);
+  return toView(m, cfg, now, loadOptions(db, [m.id]).get(m.id));
 }
 
 export type ListFilter = 'active' | 'closed' | 'settled' | 'all';
@@ -161,7 +147,11 @@ export function listMarkets(db: DB, cfg: Config, filter: ListFilter, now: number
   const rows = db
     .prepare(`${VIEW_SQL} WHERE ${where[filter]} ORDER BY ${order} LIMIT 200`)
     .all({ now }) as (MarketRow & { creator_name: string })[];
-  return rows.map((r) => toView(r, cfg, now));
+  const options = loadOptions(
+    db,
+    rows.filter((r) => r.kind === 'ODDS').map((r) => r.id),
+  );
+  return rows.map((r) => toView(r, cfg, now, options.get(r.id)));
 }
 
 // ---------------------------------------------------------------------------
@@ -185,8 +175,7 @@ export function createMarket(
   input: CreateMarketInput,
   now: number,
 ): number {
-  if (input.closeAt <= now + 60_000) throw badRequest('BAD_CLOSE_AT', '截止时间至少要在 1 分钟之后');
-  if (input.closeAt > now + 366 * 86400_000) throw badRequest('BAD_CLOSE_AT', '截止时间不能超过一年');
+  validateCloseAt(input.closeAt, now);
   if (input.subsidy < cfg.minSubsidy || input.subsidy > cfg.maxSubsidy) {
     throw badRequest('BAD_SUBSIDY', '补贴超出允许范围');
   }
@@ -278,7 +267,12 @@ export interface LiquidityQuote {
  */
 export const LIQUIDITY_PRICE_BAND = 0.9;
 
+function assertLmsr(m: MarketRow): void {
+  if (m.kind !== 'LMSR') throw badRequest('WRONG_KIND', '固定赔率市场不支持这个操作');
+}
+
 function planLiquidity(m: MarketRow, extra: number): LiquidityQuote & { vYes: number; vNo: number } {
+  assertLmsr(m);
   const s = pool(m);
   const p = priceYes(s);
   if (p < 1 - LIQUIDITY_PRICE_BAND || p > LIQUIDITY_PRICE_BAND) {
@@ -363,37 +357,17 @@ export interface TradeRequest {
   minAmount?: number;
 }
 
-function assertTradable(db: DB, m: MarketRow, now: number): void {
-  if (effectiveStatus(m, now) !== 'OPEN') throw conflict('MARKET_NOT_OPEN', '市场已停止交易');
-  if (isTradingHalted(db)) throw conflict('TRADING_HALTED', '全站交易已暂停');
-  if (m.paused) throw conflict('MARKET_PAUSED', '该市场已被管理员暂停交易');
-}
-
 /**
- * A quote after applying the price band, the per-user position cap and the fee.
- *
- * `amount` is the LMSR cost (BUY) or proceeds (SELL) and moves the price;
- * `fee` goes into the market pool; `total` is what the user actually pays
- * (BUY: amount + fee) or receives (SELL: amount - fee).
+ * A quote after applying the price band and the per-user position cap.
+ * `amount` is what the user pays (BUY) or receives (SELL).
  */
 export type BoundedQuote = Quote & {
   capped: boolean;
   cappedBy: 'PRICE' | 'POSITION' | null;
-  fee: number;
-  total: number;
 };
 
 const OUTCOME_CN: Record<Outcome, string> = { YES: '是', NO: '否' };
 const CAP_PCT = Math.round(PRICE_CAP * 100);
-
-export function feeRate(cfg: Config): number {
-  return cfg.feeBps / 10_000;
-}
-
-/** Fee on an LMSR amount, rounded up (in the pool's favour). */
-function feeOn(cfg: Config, amount: number): number {
-  return Math.ceil(amount * feeRate(cfg));
-}
 
 /** Max shares one user may hold on one side of a market, or Infinity if uncapped. */
 export function positionCap(cfg: Config, m: { b: number }): number {
@@ -404,6 +378,7 @@ export function positionCap(cfg: Config, m: { b: number }): number {
  * @param held shares of `req.outcome` the user already holds (0 when quoting anonymously)
  */
 function computeQuote(cfg: Config, m: MarketRow, req: TradeRequest, held: number): BoundedQuote {
+  assertLmsr(m);
   const s = pool(m);
   try {
     if (req.side === 'BUY') {
@@ -419,21 +394,9 @@ function computeQuote(cfg: Config, m: MarketRow, req: TradeRequest, held: number
       const limit = Math.min(priceLimit, posLimit);
       const cappedBy = posLimit < priceLimit ? 'POSITION' : 'PRICE';
 
-      // The budget covers LMSR cost + fee; shrink until rounding fits.
-      let budget = Math.floor(req.amount / (1 + feeRate(cfg)));
-      for (;;) {
-        let q = quoteBuyAmount(s, req.outcome, budget);
-        let capped = false;
-        if (q.shares > limit) {
-          q = quoteBuyShares(s, req.outcome, limit);
-          capped = true;
-        }
-        const fee = feeOn(cfg, q.amount);
-        if (q.amount + fee <= req.amount) {
-          return { ...q, capped, cappedBy: capped ? cappedBy : null, fee, total: q.amount + fee };
-        }
-        budget -= 1;
-      }
+      const q = quoteBuyAmount(s, req.outcome, req.amount);
+      if (q.shares <= limit) return { ...q, capped: false, cappedBy: null };
+      return { ...quoteBuyShares(s, req.outcome, limit), capped: true, cappedBy };
     }
 
     if (!req.shares) throw badRequest('BAD_SHARES', '请输入卖出份数');
@@ -444,8 +407,7 @@ function computeQuote(cfg: Config, m: MarketRow, req: TradeRequest, held: number
     }
     const capped = req.shares > limit;
     const q = quoteSellShares(s, req.outcome, capped ? limit : req.shares);
-    const fee = Math.min(feeOn(cfg, q.amount), q.amount);
-    return { ...q, capped, cappedBy: capped ? 'PRICE' : null, fee, total: q.amount - fee };
+    return { ...q, capped, cappedBy: capped ? 'PRICE' : null };
   } catch (e) {
     if (e instanceof LmsrError) throw badRequest('BAD_TRADE', '数量无效或太小');
     throw e;
@@ -513,28 +475,27 @@ export function executeTrade(
       throw conflict('SLIPPAGE', '价格已变动，请重新确认');
     }
     if (req.side === 'SELL') {
-      if (q.total <= 0) throw badRequest('BAD_TRADE', '卖出数量太小');
-      if (req.minAmount !== undefined && q.total < req.minAmount) {
+      if (q.amount <= 0) throw badRequest('BAD_TRADE', '卖出数量太小');
+      if (req.minAmount !== undefined && q.amount < req.minAmount) {
         throw conflict('SLIPPAGE', '价格已变动，请重新确认');
       }
     }
 
     const tr = db
       .prepare(
-        `INSERT INTO trades (market_id, user_id, outcome, side, shares, amount, fee, price_before, price_after, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO trades (market_id, user_id, outcome, side, shares, amount, price_before, price_after, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
-      .run(marketId, userId, q.outcome, q.side, q.shares, q.amount, q.fee, q.priceYesBefore, q.priceYesAfter, now);
+      .run(marketId, userId, q.outcome, q.side, q.shares, q.amount, q.priceYesBefore, q.priceYesAfter, now);
     const tradeId = Number(tr.lastInsertRowid);
 
-    // User's cash flow: pays amount + fee on a buy, receives amount - fee on a sell.
-    const delta = q.side === 'BUY' ? -q.total : q.total;
+    const delta = q.side === 'BUY' ? -q.amount : q.amount;
     const balance = applyDelta(db, userId, delta, 'trade', `t${tradeId}`, now);
 
     if (q.side === 'BUY') {
       setPosition(db, userId, marketId, q.outcome, {
         shares: pos.shares + q.shares,
-        cost_basis: pos.cost_basis + q.total,
+        cost_basis: pos.cost_basis + q.amount,
       });
     } else {
       const remaining = pos.shares - q.shares;
@@ -546,10 +507,13 @@ export function executeTrade(
     }
 
     // q.next is the LMSR state, which includes the pool's virtual shares; store user-held shares only.
-    // The pool receives the user's whole cash flow, so fees stay in it.
-    db.prepare(
-      'UPDATE markets SET q_yes = ?, q_no = ?, pool = pool + ?, volume = volume + ?, fees = fees + ? WHERE id = ?',
-    ).run(q.next.qYes - m.v_yes, q.next.qNo - m.v_no, -delta, q.amount, q.fee, marketId);
+    db.prepare('UPDATE markets SET q_yes = ?, q_no = ?, pool = pool + ?, volume = volume + ? WHERE id = ?').run(
+      q.next.qYes - m.v_yes,
+      q.next.qNo - m.v_no,
+      -delta,
+      q.amount,
+      marketId,
+    );
     return { tradeId, quote: q, balance };
   })();
 }
@@ -566,12 +530,29 @@ export function closeExpired(db: DB, now: number): number[] {
   return rows.map((r) => r.id);
 }
 
+/** A market's result: YES/NO for LMSR markets, the winning option for ODDS markets. */
+export interface Resolution {
+  outcome?: Outcome;
+  optionId?: number;
+}
+
+/** Normalize a resolution for the market's kind, rejecting a mismatched one. */
+function checkResolution(db: DB, m: MarketRow, r: Resolution): { outcome: Outcome | null; optionId: number | null } {
+  if (m.kind === 'LMSR') {
+    if (!r.outcome || r.optionId !== undefined) throw badRequest('BAD_OUTCOME', '请选择结果「是」或「否」');
+    return { outcome: r.outcome, optionId: null };
+  }
+  if (r.optionId === undefined || r.outcome) throw badRequest('BAD_OUTCOME', '请选择胜出的选项');
+  assertOptionOf(db, m, r.optionId);
+  return { outcome: null, optionId: r.optionId };
+}
+
 /** Creator proposes an outcome; it becomes final after the dispute window unless an admin overrides. */
 export function proposeResolution(
   db: DB,
   user: User,
   marketId: number,
-  outcome: Outcome,
+  resolution: Resolution,
   note: string,
   now: number,
 ): void {
@@ -579,15 +560,26 @@ export function proposeResolution(
     const m = getRow(db, marketId);
     if (m.creator_id !== user.id) throw forbidden('只有创建者可以提交结果');
     if (m.status !== 'OPEN' && m.status !== 'CLOSED') throw conflict('BAD_STATUS', '当前状态不能提交结果');
+    const r = checkResolution(db, m, resolution);
     db.prepare(
-      `UPDATE markets SET status = 'PROPOSED', proposed_outcome = ?, proposed_at = ?, proposal_note = ?,
-              close_at = MIN(close_at, ?) WHERE id = ?`,
-    ).run(outcome, now, note, now, marketId);
+      `UPDATE markets SET status = 'PROPOSED', proposed_outcome = ?, proposed_option = ?, proposed_at = ?,
+              proposal_note = ?, close_at = MIN(close_at, ?) WHERE id = ?`,
+    ).run(r.outcome, r.optionId, now, note, now, marketId);
   })();
 }
 
 /** Pay winners, return the leftover pool to the creator, mark RESOLVED. Runs inside a transaction. */
-function settleResolved(db: DB, m: MarketRow, outcome: Outcome, by: number, note: string, now: number) {
+function settleResolved(db: DB, m: MarketRow, resolution: Resolution, by: number, note: string, now: number) {
+  const r = checkResolution(db, m, resolution);
+  if (m.kind === 'ODDS') settleOdds(db, m, r.optionId!, now);
+  else settleLmsr(db, m, r.outcome!, now);
+  db.prepare(
+    `UPDATE markets SET status = 'RESOLVED', resolution = ?, resolved_option = ?, resolved_by = ?, resolved_at = ?,
+            resolution_note = ?, pool = 0, close_at = MIN(close_at, ?) WHERE id = ?`,
+  ).run(r.outcome, r.optionId, by, now, note, now, m.id);
+}
+
+function settleLmsr(db: DB, m: MarketRow, outcome: Outcome, now: number) {
   const winners = db
     .prepare('SELECT user_id, shares FROM positions WHERE market_id = ? AND outcome = ? AND shares > 0')
     .all(m.id, outcome) as { user_id: number; shares: number }[];
@@ -599,11 +591,6 @@ function settleResolved(db: DB, m: MarketRow, outcome: Outcome, by: number, note
   }
   if (poolLeft < 0) throw new Error(`market ${m.id} pool insufficient for payout`);
   returnLeftover(db, m, poolLeft, now);
-
-  db.prepare(
-    `UPDATE markets SET status = 'RESOLVED', resolution = ?, resolved_by = ?, resolved_at = ?,
-            resolution_note = ?, pool = 0, close_at = MIN(close_at, ?) WHERE id = ?`,
-  ).run(outcome, by, now, note, now, m.id);
 }
 
 /** Admin: final resolution, overriding any proposal. */
@@ -611,7 +598,7 @@ export function adminResolve(
   db: DB,
   admin: User,
   marketId: number,
-  outcome: Outcome,
+  resolution: Resolution,
   note: string,
   now: number,
 ): void {
@@ -619,7 +606,7 @@ export function adminResolve(
   db.transaction(() => {
     const m = getRow(db, marketId);
     if (SETTLED.includes(m.status)) throw conflict('BAD_STATUS', '市场已结算');
-    settleResolved(db, m, outcome, admin.id, note, now);
+    settleResolved(db, m, resolution, admin.id, note, now);
   })();
 }
 
@@ -632,7 +619,9 @@ export function finalizeProposals(db: DB, cfg: Config, now: number): number[] {
     db.transaction(() => {
       const fresh = getRow(db, m.id);
       if (fresh.status !== 'PROPOSED') return;
-      settleResolved(db, fresh, fresh.proposed_outcome!, fresh.creator_id, fresh.proposal_note ?? '', now);
+      const resolution: Resolution =
+        fresh.kind === 'ODDS' ? { optionId: fresh.proposed_option! } : { outcome: fresh.proposed_outcome! };
+      settleResolved(db, fresh, resolution, fresh.creator_id, fresh.proposal_note ?? '', now);
     })();
   }
   return due.map((m) => m.id);
@@ -649,30 +638,37 @@ export function cancelMarket(db: DB, user: User, marketId: number, note: string,
     if (SETTLED.includes(m.status)) throw conflict('BAD_STATUS', '市场已结算');
     if (user.role !== 'admin') {
       if (m.creator_id !== user.id) throw forbidden();
-      const traded = db.prepare('SELECT 1 FROM trades WHERE market_id = ? LIMIT 1').get(m.id);
+      const traded =
+        m.kind === 'ODDS' ? hasBets(db, m.id) : !!db.prepare('SELECT 1 FROM trades WHERE market_id = ? LIMIT 1').get(m.id);
       if (traded) throw forbidden('已有交易的市场只能由管理员作废');
     }
 
-    const spends = db
-      .prepare(
-        `SELECT user_id, SUM(CASE side WHEN 'BUY' THEN amount + fee ELSE -(amount - fee) END) AS net
-         FROM trades WHERE market_id = ? GROUP BY user_id HAVING net > 0`,
-      )
-      .all(m.id) as { user_id: number; net: number }[];
-    const total = spends.reduce((s, r) => s + r.net, 0);
-    let poolLeft = m.pool;
-    for (const r of spends) {
-      const refund = total <= m.pool ? r.net : Math.floor((m.pool * r.net) / total);
-      if (refund > 0) applyDelta(db, r.user_id, refund, 'cancel_refund', `m${m.id}`, now);
-      poolLeft -= refund;
-    }
-    returnLeftover(db, m, poolLeft, now);
-
+    if (m.kind === 'ODDS') refundOdds(db, m, now);
+    else refundLmsr(db, m, now);
     db.prepare(
       `UPDATE markets SET status = 'CANCELLED', resolved_by = ?, resolved_at = ?, resolution_note = ?,
               pool = 0, close_at = MIN(close_at, ?) WHERE id = ?`,
     ).run(user.id, now, note, now, m.id);
   })();
+}
+
+/** LMSR void: refund each trader's net spend, pro-rata if the pool can't cover it. Runs inside a transaction. */
+function refundLmsr(db: DB, m: MarketRow, now: number): void {
+  // `fee` is 0 for new trades; it is kept here so trades made while a fee was charged refund in full.
+  const spends = db
+    .prepare(
+      `SELECT user_id, SUM(CASE side WHEN 'BUY' THEN amount + fee ELSE -(amount - fee) END) AS net
+       FROM trades WHERE market_id = ? GROUP BY user_id HAVING net > 0`,
+    )
+    .all(m.id) as { user_id: number; net: number }[];
+  const total = spends.reduce((s, r) => s + r.net, 0);
+  let poolLeft = m.pool;
+  for (const r of spends) {
+    const refund = total <= m.pool ? r.net : Math.floor((m.pool * r.net) / total);
+    if (refund > 0) applyDelta(db, r.user_id, refund, 'cancel_refund', `m${m.id}`, now);
+    poolLeft -= refund;
+  }
+  returnLeftover(db, m, poolLeft, now);
 }
 
 // ---------------------------------------------------------------------------
@@ -681,6 +677,7 @@ export function cancelMarket(db: DB, user: User, marketId: number, note: string,
 
 export function priceHistory(db: DB, marketId: number): { t: number; p: number }[] {
   const m = getRow(db, marketId);
+  if (m.kind !== 'LMSR') return [];
   const rows = db
     .prepare('SELECT created_at AS t, price_after AS p FROM trades WHERE market_id = ? ORDER BY id')
     .all(marketId) as { t: number; p: number }[];
@@ -753,13 +750,14 @@ export function portfolio(db: DB, userId: number, now: number) {
 
 /**
  * Rank by profit = net worth - points granted by the system, where net worth is
- * balance + open positions at current prices + subsidies locked in own unsettled markets.
+ * balance + open positions at current prices + open bets at stake + subsidies / deposits
+ * locked in own unsettled markets.
  */
 export function leaderboard(db: DB, limit = 50) {
   const users = db
     .prepare(
       `SELECT u.id, u.username, u.balance,
-         COALESCE((SELECT SUM(delta) FROM ledger l WHERE l.user_id = u.id AND l.reason IN ('signup', 'checkin')), 0) AS granted,
+         COALESCE((SELECT SUM(delta) FROM ledger l WHERE l.user_id = u.id AND l.reason IN ('signup', 'checkin', 'reset')), 0) AS granted,
          COALESCE((SELECT SUM(subsidy) FROM markets m WHERE m.creator_id = u.id AND m.status NOT IN ('RESOLVED', 'CANCELLED')), 0) AS locked
        FROM users u WHERE u.username != '__house__'`,
     )
@@ -772,6 +770,14 @@ export function leaderboard(db: DB, limit = 50) {
     )
     .all() as { user_id: number; outcome: Outcome; shares: number; b: number; q_yes: number; q_no: number }[];
   const value = new Map<number, number>();
+  // Open fixed-odds bets count at their stake until settled.
+  const stakes = db
+    .prepare(
+      `SELECT b.user_id, SUM(b.stake) AS stake FROM bets b JOIN markets m ON m.id = b.market_id
+       WHERE m.status NOT IN ('RESOLVED', 'CANCELLED') GROUP BY b.user_id`,
+    )
+    .all() as { user_id: number; stake: number }[];
+  for (const st of stakes) value.set(st.user_id, st.stake);
   for (const p of positions) {
     const v = p.shares * priceOf({ b: p.b, qYes: p.q_yes, qNo: p.q_no }, p.outcome);
     value.set(p.user_id, (value.get(p.user_id) ?? 0) + v);

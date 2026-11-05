@@ -8,6 +8,8 @@
  *   predictctl reconcile
  *   predictctl liquidity <id> <points>                    # dry run: shows the deposit
  *   predictctl liquidity <id> <points> --max <deposit>    # execute; refuses if the deposit exceeds <deposit>
+ *   predictctl reset <points>              # dry run: what a full reset would wipe
+ *   predictctl reset <points> --confirm    # back up the database, wipe all markets and history, every user starts at <points>
  *
  * Changes take effect immediately: the server reads these flags on every trade.
  */
@@ -17,9 +19,11 @@ import type { User } from './auth.js';
 import { reconcile } from './ledger.js';
 import { SCALE } from './market/lmsr.js';
 import { addLiquidity, quoteLiquidity } from './markets.js';
+import { planReset, resetAll } from './reset.js';
 
 const [cmd, ...args] = process.argv.slice(2);
-const db = openDb(loadConfig().dbPath);
+const dbPath = loadConfig().dbPath;
+const db = openDb(dbPath);
 
 function onOff(v: string | undefined): boolean {
   if (v === 'on') return true;
@@ -28,7 +32,9 @@ function onOff(v: string | undefined): boolean {
 }
 
 function usage(): never {
-  console.error('usage: predictctl status | halt on|off | pause <marketId> on|off | reconcile | liquidity <marketId> <points> [--max <deposit>]');
+  console.error(
+    'usage: predictctl status | halt on|off | pause <marketId> on|off | reconcile | liquidity <marketId> <points> [--max <deposit>] | reset <points> [--confirm]',
+  );
   process.exit(2);
 }
 
@@ -89,6 +95,27 @@ switch (cmd) {
     const operator = { id: 0, username: 'predictctl', role: 'admin' } as User;
     const done = addLiquidity(db, operator, id, extra, Date.now(), Math.round(maxPoints * SCALE));
     console.log(`已执行：b = ${fmt(done.bAfter)}，平台出资 ${fmt(done.deposit)} 积分`);
+    break;
+  }
+  case 'reset': {
+    const points = Number(args[0]);
+    if (!Number.isInteger(points) || points < 0) usage();
+    const fmt = (u: number) => (u / SCALE).toFixed(1);
+    const p = planReset(db, points * SCALE);
+    console.log(
+      `将删除 ${p.markets} 个市场、${p.trades} 笔交易、${p.bets} 笔投注和全部积分流水；` +
+        `${p.users} 个用户（当前余额合计 ${fmt(p.balancesBefore)}）每人重置为 ${points} 积分。账号和密码保留。`,
+    );
+    if (!args.includes('--confirm')) {
+      console.log(`（试算，未执行。确认请运行：predictctl reset ${points} --confirm）`);
+      break;
+    }
+    const backup = `${dbPath}.before-reset-${new Date().toISOString().replace(/[:.]/g, '-')}`;
+    db.prepare('VACUUM INTO ?').run(backup);
+    console.log(`已备份到 ${backup}`);
+    resetAll(db, points * SCALE, Date.now());
+    const rep = reconcile(db);
+    console.log(`已重置。对账：${rep.ok ? '正常' : JSON.stringify(rep)}`);
     break;
   }
   case 'reconcile': {

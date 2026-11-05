@@ -8,7 +8,7 @@ const router = createRouter({
   history: createWebHistory(),
   routes: [
     { path: '/', component: () => import('./views/Markets.vue') },
-    { path: '/m/:id(\\d+)', component: () => import('./views/MarketDetail.vue'), props: (r) => ({ id: Number(r.params.id) }) },
+    { path: '/m/:id(\\d+)', component: () => import('./views/MarketPage.vue'), props: (r) => ({ id: Number(r.params.id) }) },
     { path: '/new', component: () => import('./views/NewMarket.vue') },
     { path: '/portfolio', component: () => import('./views/Portfolio.vue') },
     { path: '/leaderboard', component: () => import('./views/Leaderboard.vue') },

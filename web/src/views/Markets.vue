@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { onMounted, onUnmounted, ref, watch } from 'vue';
-import { api, pct, pts, relative, STATUS_LABEL, OUTCOME_LABEL, type Market } from '../api';
+import { api, fmtOdds, pct, pts, relative, STATUS_LABEL, OUTCOME_LABEL, type Market } from '../api';
 import ProbBar from '../components/ProbBar.vue';
 import { onLive, store, toastError } from '../store';
 
@@ -38,6 +38,8 @@ onMounted(() => {
     if (m && m.status === e.status) {
       m.priceYes = e.priceYes;
       m.volume = e.volume;
+      // Odds and remaining capacity are not in the live event.
+      if (m.kind === 'ODDS') load();
     } else {
       load();
     }
@@ -66,7 +68,20 @@ onUnmounted(() => off?.());
   <div v-else class="grid">
     <RouterLink v-for="m in markets" :key="m.id" :to="`/m/${m.id}`" class="card market">
       <div class="title">{{ m.title }}</div>
-      <div class="prob row">
+      <template v-if="m.kind === 'ODDS'">
+        <div class="odds-row">
+          <span
+            v-for="o in m.options ?? []"
+            :key="o.id"
+            class="odds-chip"
+            :class="{ won: m.status === 'RESOLVED' && m.resolvedOptionId === o.id }"
+          >
+            {{ o.label }} <b class="num">{{ fmtOdds(o.odds) }}</b>
+          </span>
+        </div>
+        <div v-if="m.status === 'CANCELLED'"><span class="badge">已作废</span></div>
+      </template>
+      <div v-else class="prob row">
         <template v-if="m.status === 'RESOLVED' && m.resolution">
           <span class="badge" :class="m.resolution">结果：{{ OUTCOME_LABEL[m.resolution] }}</span>
         </template>
@@ -74,13 +89,14 @@ onUnmounted(() => off?.());
           <span class="badge">已作废</span>
         </template>
         <template v-else>
-          <span class="big num yes-text">{{ pct(m.priceYes) }}</span>
+          <span class="big num yes-text">{{ pct(m.priceYes ?? 0.5) }}</span>
           <span class="muted small">认为“是”</span>
         </template>
       </div>
-      <ProbBar v-if="m.status !== 'CANCELLED'" :p="m.priceYes" />
+      <ProbBar v-if="m.kind === 'LMSR' && m.status !== 'CANCELLED'" :p="m.priceYes ?? 0.5" />
       <div class="meta row small muted">
         <span class="badge" :class="m.status">{{ STATUS_LABEL[m.status] }}</span>
+        <span v-if="m.kind === 'ODDS'" class="badge kind">固定赔率</span>
         <span v-if="m.paused && m.status === 'OPEN'" class="badge CLOSED">已暂停</span>
         <span class="num">成交 {{ pts(m.volume) }}</span>
         <div class="spacer" />
@@ -128,6 +144,29 @@ onUnmounted(() => off?.());
 }
 .meta {
   gap: 8px;
+}
+.odds-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.odds-chip {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 4px 8px;
+  font-size: 13px;
+}
+.odds-chip b {
+  color: var(--accent);
+  margin-left: 2px;
+}
+.odds-chip.won {
+  border-color: var(--yes);
+  background: var(--yes-soft);
+}
+.badge.kind {
+  background: var(--accent-soft);
+  color: var(--accent);
 }
 @media (max-width: 640px) {
   .filter {

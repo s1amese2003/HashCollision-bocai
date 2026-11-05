@@ -14,7 +14,7 @@ let db: DB;
 let app: App;
 
 beforeEach(async () => {
-  cfg = loadConfig({ dbPath: ':memory:', adminUsernames: ['admin'], webDir: '', houseSubsidy: 500 * SCALE, feeBps: 0, positionCapB: 0 });
+  cfg = loadConfig({ dbPath: ':memory:', adminUsernames: ['admin'], webDir: '', houseSubsidy: 500 * SCALE, positionCapB: 0, signupBonus: 1000 * SCALE });
   db = openDb(':memory:');
   app = await buildApp({ cfg, db, now: () => clock, rateLimit: false });
 });

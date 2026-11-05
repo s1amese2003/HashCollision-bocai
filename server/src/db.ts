@@ -108,9 +108,45 @@ const MIGRATIONS: string[] = [
   VALUES ('__house__', '!', 'user', CAST(strftime('%s', 'now') AS INTEGER) * 1000);
   `,
   `
-  -- Trading fee, paid into the market pool. trades.amount stays the LMSR cost/proceeds.
+  -- Trading fee (since removed; new trades record 0). Kept for trades made while it was charged.
   ALTER TABLE trades ADD COLUMN fee INTEGER NOT NULL DEFAULT 0;
   ALTER TABLE markets ADD COLUMN fees INTEGER NOT NULL DEFAULT 0;
+  `,
+  `
+  -- Fixed-odds markets: the creator is the bookmaker. For kind = 'ODDS',
+  -- markets.subsidy is the creator's deposit, pool = deposit + all stakes, and
+  -- the LMSR columns (b, q_*, v_*) stay 0. Outcomes are rows of odds_options and
+  -- the result is stored in proposed_option / resolved_option.
+  ALTER TABLE markets ADD COLUMN kind TEXT NOT NULL DEFAULT 'LMSR' CHECK (kind IN ('LMSR', 'ODDS'));
+  ALTER TABLE markets ADD COLUMN proposed_option INTEGER;
+  ALTER TABLE markets ADD COLUMN resolved_option INTEGER;
+
+  CREATE TABLE odds_options (
+    id          INTEGER PRIMARY KEY,
+    market_id   INTEGER NOT NULL REFERENCES markets(id),
+    position    INTEGER NOT NULL,
+    label       TEXT NOT NULL,
+    -- Current decimal odds x 100 (185 = 1.85: a winning stake of 1 returns 1.85 including the stake).
+    odds        INTEGER NOT NULL CHECK (odds > 100),
+    stake_total INTEGER NOT NULL DEFAULT 0,
+    -- Sum of bets.payout on this option: what the market owes if it wins.
+    liability   INTEGER NOT NULL DEFAULT 0,
+    UNIQUE (market_id, position)
+  );
+
+  CREATE TABLE bets (
+    id         INTEGER PRIMARY KEY,
+    market_id  INTEGER NOT NULL REFERENCES markets(id),
+    option_id  INTEGER NOT NULL REFERENCES odds_options(id),
+    user_id    INTEGER NOT NULL REFERENCES users(id),
+    stake      INTEGER NOT NULL CHECK (stake > 0),
+    -- Odds locked at bet time (x 100) and the resulting return if the option wins.
+    odds       INTEGER NOT NULL,
+    payout     INTEGER NOT NULL,
+    created_at INTEGER NOT NULL
+  );
+  CREATE INDEX bets_market ON bets(market_id, id);
+  CREATE INDEX bets_user ON bets(user_id, id);
   `,
 ];
 

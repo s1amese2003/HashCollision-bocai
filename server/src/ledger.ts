@@ -11,6 +11,12 @@ export type LedgerReason =
   | 'subsidy_return'
   | 'cancel_refund'
   | 'house_mint'
+  // Fixed-odds markets: a stake, the creator's deposit, and what the creator gets back at settlement.
+  | 'bet'
+  | 'deposit'
+  | 'book_return'
+  // Operator reset of every balance (predictctl reset).
+  | 'reset'
   // Manual corrections by an operator (see server/scripts).
   | 'trade_revert'
   | 'liquidity_revert';
@@ -54,7 +60,7 @@ export interface ReconcileReport {
   ok: boolean;
   /** Users whose balance differs from the sum of their journal. */
   balanceMismatches: { userId: number; balance: number; ledgerSum: number }[];
-  /** Markets whose pool went negative or whose shares don't match positions. */
+  /** Markets whose pool, shares or bets don't add up. */
   marketMismatches: { marketId: number; problem: string }[];
 }
 
@@ -71,14 +77,16 @@ export function reconcile(db: DB): ReconcileReport {
   const marketMismatches: ReconcileReport['marketMismatches'] = [];
   const rows = db
     .prepare(
-      `SELECT m.id, m.status, m.q_yes, m.q_no, m.pool, m.b, m.v_yes, m.v_no,
+      `SELECT m.id, m.kind, m.status, m.q_yes, m.q_no, m.pool, m.b, m.v_yes, m.v_no, m.subsidy,
          COALESCE((SELECT SUM(shares) FROM positions p WHERE p.market_id = m.id AND outcome = 'YES'), 0) AS pos_yes,
          COALESCE((SELECT SUM(shares) FROM positions p WHERE p.market_id = m.id AND outcome = 'NO'), 0) AS pos_no
        FROM markets m`,
     )
     .all() as {
     id: number;
+    kind: string;
     status: string;
+    subsidy: number;
     q_yes: number;
     q_no: number;
     pool: number;
@@ -88,8 +96,35 @@ export function reconcile(db: DB): ReconcileReport {
     pos_yes: number;
     pos_no: number;
   }[];
+  const oddsOptions = db.prepare(
+    `SELECT o.id, o.stake_total, o.liability,
+       COALESCE((SELECT SUM(stake) FROM bets b WHERE b.option_id = o.id), 0) AS stakes,
+       COALESCE((SELECT SUM(payout) FROM bets b WHERE b.option_id = o.id), 0) AS payouts
+     FROM odds_options o WHERE o.market_id = ?`,
+  );
   for (const r of rows) {
     const settled = r.status === 'RESOLVED' || r.status === 'CANCELLED';
+    if (r.kind === 'ODDS') {
+      if (settled) {
+        if (r.pool !== 0) marketMismatches.push({ marketId: r.id, problem: `settled market still holds ${r.pool}` });
+        continue;
+      }
+      const opts = oddsOptions.all(r.id) as { id: number; stake_total: number; liability: number; stakes: number; payouts: number }[];
+      const stakes = opts.reduce((s, o) => s + o.stakes, 0);
+      if (r.pool !== r.subsidy + stakes) {
+        marketMismatches.push({ marketId: r.id, problem: 'pool != deposit + stakes' });
+      }
+      for (const o of opts) {
+        if (o.stake_total !== o.stakes || o.liability !== o.payouts) {
+          marketMismatches.push({ marketId: r.id, problem: `option ${o.id} totals do not match bets` });
+        }
+        // The bookmaker must be able to pay out whichever option wins.
+        if (r.pool < o.liability) {
+          marketMismatches.push({ marketId: r.id, problem: `pool cannot cover option ${o.id}` });
+        }
+      }
+      continue;
+    }
     if (!settled && (r.q_yes !== r.pos_yes || r.q_no !== r.pos_no)) {
       marketMismatches.push({ marketId: r.id, problem: 'shares do not match positions' });
     }

@@ -3,6 +3,8 @@ export const SCALE = 1000;
 export type Outcome = 'YES' | 'NO';
 export type Side = 'BUY' | 'SELL';
 export type MarketStatus = 'OPEN' | 'CLOSED' | 'PROPOSED' | 'RESOLVED' | 'CANCELLED';
+/** LMSR: YES/NO prediction market. ODDS: creator-set fixed odds, creator is the bookmaker. */
+export type MarketKind = 'LMSR' | 'ODDS';
 
 export interface Me {
   id: number;
@@ -19,13 +21,31 @@ export interface SiteConfig {
   minSubsidy: number;
   maxSubsidy: number;
   houseSubsidy: number;
-  feeBps: number;
   positionCapB: number;
+  minDeposit: number;
+  minStake: number;
+  /** Decimal odds x 100. */
+  minOdds: number;
+  maxOdds: number;
+  maxOptions: number;
   disputeWindowMs: number;
+}
+
+export interface OddsOption {
+  id: number;
+  label: string;
+  /** Decimal odds x 100 (185 = 1.85, stake included). */
+  odds: number;
+  stakeTotal: number;
+  /** What the bookmaker pays if this option wins. */
+  liability: number;
+  /** Largest stake the bookmaker can still accept on this option. */
+  maxStake: number;
 }
 
 export interface Market {
   id: number;
+  kind: MarketKind;
   creatorId: number;
   creatorName: string;
   title: string;
@@ -33,12 +53,13 @@ export interface Market {
   rules: string;
   sourceUrl: string | null;
   status: MarketStatus;
-  priceYes: number;
+  /** null for ODDS markets. */
+  priceYes: number | null;
   b: number;
+  /** LMSR: creator's subsidy. ODDS: creator's deposit. */
   subsidy: number;
   houseSubsidy: number;
   paused: boolean;
-  fees: number;
   positionCap: number | null;
   volume: number;
   closeAt: number;
@@ -50,6 +71,46 @@ export interface Market {
   resolvedAt: number | null;
   resolutionNote: string | null;
   createdAt: number;
+  /** ODDS only. */
+  options: OddsOption[] | null;
+  proposedOptionId: number | null;
+  resolvedOptionId: number | null;
+}
+
+export interface BetRow {
+  id: number;
+  username: string;
+  optionId: number;
+  label: string;
+  stake: number;
+  odds: number;
+  payout: number;
+  createdAt: number;
+}
+
+export interface OpenBet {
+  betId: number;
+  marketId: number;
+  title: string;
+  status: MarketStatus;
+  label: string;
+  stake: number;
+  odds: number;
+  payout: number;
+  createdAt: number;
+}
+
+/** `outcome` for YES/NO markets, `optionId` for fixed-odds markets. */
+export type Resolution = { outcome: Outcome } | { optionId: number };
+
+export interface MarketDetailData {
+  market: Market;
+  /** LMSR */
+  trades?: TradeRow[];
+  positions?: Record<Outcome, Position> | null;
+  /** ODDS */
+  bets?: BetRow[];
+  myBets?: BetRow[] | null;
 }
 
 export interface TradeRow {
@@ -79,10 +140,6 @@ export interface Quote {
   /** True when the trade was truncated (price band or position cap). */
   capped: boolean;
   cappedBy: 'PRICE' | 'POSITION' | null;
-  /** Fee paid into the pool, in units. */
-  fee: number;
-  /** What the user actually pays (BUY: amount + fee) or receives (SELL: amount - fee). */
-  total: number;
 }
 
 export interface LiquidityQuote {
@@ -153,27 +210,27 @@ export const api = {
   checkin: () => request<{ user: Me }>('POST', '/api/checkin', {}),
 
   markets: (filter: string) => request<{ markets: Market[] }>('GET', `/api/markets?filter=${filter}`),
-  market: (id: number) =>
-    request<{ market: Market; trades: TradeRow[]; positions: Record<Outcome, Position> | null }>(
-      'GET',
-      `/api/markets/${id}`,
-    ),
+  market: (id: number) => request<MarketDetailData>('GET', `/api/markets/${id}`),
   history: (id: number) => request<{ points: { t: number; p: number }[] }>('GET', `/api/markets/${id}/history`),
-  createMarket: (body: {
-    title: string;
-    description: string;
-    rules: string;
-    sourceUrl: string;
-    closeAt: number;
-    subsidy: number;
-  }) => request<{ id: number }>('POST', '/api/markets', body),
+  createMarket: (
+    body: { title: string; description: string; rules: string; sourceUrl: string; closeAt: number } & (
+      | { kind: 'LMSR'; subsidy: number }
+      | { kind: 'ODDS'; deposit: number; options: { label: string; odds: number }[] }
+    ),
+  ) => request<{ id: number }>('POST', '/api/markets', body),
   quote: (id: number, body: object) => request<{ quote: Quote }>('POST', `/api/markets/${id}/quote`, body),
   trade: (id: number, body: object) =>
     request<{ quote: Quote; balance: number }>('POST', `/api/markets/${id}/trade`, body),
-  propose: (id: number, outcome: Outcome, note: string) =>
-    request<{ market: Market }>('POST', `/api/markets/${id}/propose`, { outcome, note }),
-  resolve: (id: number, outcome: Outcome, note: string) =>
-    request<{ market: Market }>('POST', `/api/markets/${id}/resolve`, { outcome, note }),
+  propose: (id: number, r: Resolution, note: string) =>
+    request<{ market: Market }>('POST', `/api/markets/${id}/propose`, { ...r, note }),
+  resolve: (id: number, r: Resolution, note: string) =>
+    request<{ market: Market }>('POST', `/api/markets/${id}/resolve`, { ...r, note }),
+  bet: (id: number, body: { optionId: number; stake: number; odds: number }) =>
+    request<{ bet: BetRow; balance: number }>('POST', `/api/markets/${id}/bet`, body),
+  setOdds: (id: number, odds: { optionId: number; odds: number }[]) =>
+    request<{ market: Market }>('POST', `/api/markets/${id}/odds`, { odds }),
+  addDeposit: (id: number, amount: number) =>
+    request<{ market: Market }>('POST', `/api/markets/${id}/deposit`, { amount }),
   cancel: (id: number, note: string) => request<{ market: Market }>('POST', `/api/markets/${id}/cancel`, { note }),
   pause: (id: number, paused: boolean) => request<{ market: Market }>('POST', `/api/markets/${id}/pause`, { paused }),
   halt: (halted: boolean) => request<{ tradingHalted: boolean }>('POST', '/api/admin/halt', { halted }),
@@ -182,7 +239,8 @@ export const api = {
   addLiquidity: (id: number, amount: number, maxDeposit: number) =>
     request<{ quote: LiquidityQuote; market: Market }>('POST', `/api/markets/${id}/liquidity`, { amount, maxDeposit }),
 
-  portfolio: () => request<{ positions: PortfolioItem[]; ledger: LedgerRow[] }>('GET', '/api/portfolio'),
+  portfolio: () =>
+    request<{ positions: PortfolioItem[]; bets: OpenBet[]; ledger: LedgerRow[] }>('GET', '/api/portfolio'),
   leaderboard: () => request<{ leaderboard: LeaderRow[] }>('GET', '/api/leaderboard'),
 };
 
@@ -196,6 +254,11 @@ export function pts(units: number): string {
 
 export function toUnits(points: number): number {
   return Math.round(points * SCALE);
+}
+
+/** Decimal odds (x 100 integer) -> "1.85". */
+export function fmtOdds(odds: number): string {
+  return (odds / 100).toFixed(2);
 }
 
 export function pct(p: number): string {
@@ -247,4 +310,10 @@ export const REASON_LABEL: Record<string, string> = {
   house_mint: '平台注资',
   trade_revert: '交易撤回（退款）',
   liquidity_revert: '流动性撤回',
+  bet: '下注',
+  deposit: '坐庄保证金',
+  book_return: '坐庄结算返还',
+  reset: '积分重置',
 };
+
+export const KIND_LABEL: Record<MarketKind, string> = { LMSR: '是/否预测', ODDS: '固定赔率' };

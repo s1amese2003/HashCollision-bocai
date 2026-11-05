@@ -35,8 +35,8 @@ async function load() {
   try {
     const [d, h] = await Promise.all([api.market(props.id), api.history(props.id)]);
     market.value = d.market;
-    trades.value = d.trades;
-    positions.value = d.positions;
+    trades.value = d.trades ?? [];
+    positions.value = d.positions ?? null;
     history.value = h.points;
     now.value = Date.now();
   } catch (e) {
@@ -58,7 +58,8 @@ const isOpen = computed(() => market.value?.status === 'OPEN');
 /** Open, not paused by an admin, and no site-wide halt. */
 const canTrade = computed(() => isOpen.value && !market.value?.paused && !store.tradingHalted);
 const held = computed(() => positions.value?.[outcome.value].shares ?? 0);
-const priceOf = (o: Outcome) => (market.value ? (o === 'YES' ? market.value.priceYes : 1 - market.value.priceYes) : 0.5);
+const priceYes = computed(() => market.value?.priceYes ?? 0.5);
+const priceOf = (o: Outcome) => (o === 'YES' ? priceYes.value : 1 - priceYes.value);
 
 let quoteTimer: ReturnType<typeof setTimeout> | undefined;
 function requestQuote() {
@@ -87,16 +88,13 @@ function setMax() {
 const insufficient = computed(() => {
   const units = toUnits(input.value ?? 0);
   // A buy may be truncated at the price cap, so compare what will actually be spent.
-  if (side.value === 'BUY') return (quote.value?.total ?? units) > (store.me?.balance ?? 0);
+  if (side.value === 'BUY') return (quote.value?.amount ?? units) > (store.me?.balance ?? 0);
   return units > held.value;
 });
 
 /** Buying at an average price this high has little upside and full downside. */
 const HIGH_PRICE = 0.95;
-const highPrice = computed(
-  () => quote.value?.side === 'BUY' && quote.value.total / quote.value.shares >= HIGH_PRICE,
-);
-const feePct = computed(() => (store.config?.feeBps ?? 0) / 100);
+const highPrice = computed(() => quote.value?.side === 'BUY' && quote.value.avgPrice >= HIGH_PRICE);
 
 async function submitTrade() {
   if (!quote.value) return;
@@ -106,13 +104,13 @@ async function submitTrade() {
     const body =
       q.side === 'BUY'
         ? { outcome: q.outcome, side: 'BUY', amount: toUnits(input.value ?? 0), minShares: q.shares }
-        : { outcome: q.outcome, side: 'SELL', shares: q.shares, minAmount: q.total };
+        : { outcome: q.outcome, side: 'SELL', shares: q.shares, minAmount: q.amount };
     const r = await api.trade(props.id, body);
     if (store.me) store.me.balance = r.balance;
     toast(
       r.quote.side === 'BUY'
-        ? `买入 ${pts(r.quote.shares)} 份「${OUTCOME_LABEL[r.quote.outcome]}」，花费 ${pts(r.quote.total)} 积分`
-        : `卖出 ${pts(r.quote.shares)} 份，获得 ${pts(r.quote.total)} 积分`,
+        ? `买入 ${pts(r.quote.shares)} 份「${OUTCOME_LABEL[r.quote.outcome]}」，花费 ${pts(r.quote.amount)} 积分`
+        : `卖出 ${pts(r.quote.shares)} 份，获得 ${pts(r.quote.amount)} 积分`,
     );
     input.value = null;
     await load();
@@ -139,8 +137,8 @@ async function confirmAction() {
   if (!p) return;
   busy.value = true;
   try {
-    if (p.kind === 'propose') await api.propose(props.id, p.outcome, note.value);
-    else if (p.kind === 'resolve') await api.resolve(props.id, p.outcome, note.value);
+    if (p.kind === 'propose') await api.propose(props.id, { outcome: p.outcome }, note.value);
+    else if (p.kind === 'resolve') await api.resolve(props.id, { outcome: p.outcome }, note.value);
     else await api.cancel(props.id, note.value);
     toast('操作成功');
     pending.value = null;
@@ -273,7 +271,7 @@ const chartEnd = computed(() => {
             <span class="big muted">已作废</span>
           </template>
           <template v-else>
-            <span class="big num yes-text">{{ pct(market.priceYes) }}</span>
+            <span class="big num yes-text">{{ pct(priceYes) }}</span>
             <span class="muted">的概率认为“是”</span>
           </template>
           <div class="spacer" />
@@ -379,7 +377,6 @@ const chartEnd = computed(() => {
             <div class="hint num">
               <template v-if="side === 'BUY'">可用 {{ pts(store.me.balance) }} 积分</template>
               <template v-else>持有 {{ pts(held) }} 份「{{ OUTCOME_LABEL[outcome] }}」</template>
-              <template v-if="feePct > 0"> · 手续费 {{ feePct }}%</template>
               <template v-if="side === 'BUY' && market.positionCap"> · 单边上限 {{ pts(market.positionCap) }} 份</template>
             </div>
           </div>
@@ -389,18 +386,16 @@ const chartEnd = computed(() => {
               <div class="row"><span class="muted">获得份数</span><div class="spacer" />{{ pts(quote.shares) }}</div>
               <div class="row"><span class="muted">平均价格</span><div class="spacer" />{{ (quote.avgPrice * 100).toFixed(1) }}%</div>
               <div class="row"><span class="muted">成交后概率（是）</span><div class="spacer" />{{ pct(quote.priceYesAfter) }}</div>
-              <div v-if="quote.fee > 0" class="row"><span class="muted">手续费（{{ feePct }}%）</span><div class="spacer" />{{ pts(quote.fee) }}</div>
-              <div class="row"><span class="muted">合计花费</span><div class="spacer" />{{ pts(quote.total) }}</div>
+              <div class="row"><span class="muted">花费</span><div class="spacer" />{{ pts(quote.amount) }}</div>
               <div class="row strong">
                 <span>若结果为「{{ OUTCOME_LABEL[quote.outcome] }}」可得</span><div class="spacer" />
-                <span class="yes-text">{{ pts(quote.shares) }}（+{{ pts(quote.shares - quote.total) }}）</span>
+                <span class="yes-text">{{ pts(quote.shares) }}（+{{ pts(quote.shares - quote.amount) }}）</span>
               </div>
             </template>
             <template v-else>
               <div class="row"><span class="muted">平均价格</span><div class="spacer" />{{ (quote.avgPrice * 100).toFixed(1) }}%</div>
               <div class="row"><span class="muted">成交后概率（是）</span><div class="spacer" />{{ pct(quote.priceYesAfter) }}</div>
-              <div v-if="quote.fee > 0" class="row"><span class="muted">手续费（{{ feePct }}%）</span><div class="spacer" />{{ pts(quote.fee) }}</div>
-              <div class="row strong"><span>实际到账</span><div class="spacer" />{{ pts(quote.total) }}</div>
+              <div class="row strong"><span>可得积分</span><div class="spacer" />{{ pts(quote.amount) }}</div>
             </template>
           </div>
           <div v-else-if="quoteError" class="small no-text">{{ quoteError }}</div>
@@ -408,19 +403,19 @@ const chartEnd = computed(() => {
           <div v-if="quote?.capped" class="alert small">
             <template v-if="quote.side === 'BUY' && quote.cappedBy === 'POSITION'">
               每人在本市场单边最多持有 {{ pts(market.positionCap ?? 0) }} 份，本次只能买入 {{ pts(quote.shares) }} 份，实际花费
-              {{ pts(quote.total) }} 积分。
+              {{ pts(quote.amount) }} 积分。
             </template>
             <template v-else-if="quote.side === 'BUY'">
-              价格最高只能到 99%，本次只能买入 {{ pts(quote.shares) }} 份，实际花费 {{ pts(quote.total) }} 积分。
+              价格最高只能到 99%，本次只能买入 {{ pts(quote.shares) }} 份，实际花费 {{ pts(quote.amount) }} 积分。
             </template>
             <template v-else>
               价格最高只能到 99%，本次只能卖出 {{ pts(quote.shares) }} 份，其余等价格回落后再卖。
             </template>
           </div>
           <div v-if="highPrice" class="alert warn small">
-            含手续费均价 {{ ((quote!.total / quote!.shares) * 100).toFixed(1) }}%：猜对最多只赚
-            {{ pts(quote!.shares - quote!.total) }} 积分（{{ ((quote!.shares / quote!.total - 1) * 100).toFixed(1) }}%），
-            猜错会亏掉全部 {{ pts(quote!.total) }} 积分。
+            成交均价 {{ (quote!.avgPrice * 100).toFixed(1) }}%：猜对最多只赚
+            {{ pts(quote!.shares - quote!.amount) }} 积分（{{ ((quote!.shares / quote!.amount - 1) * 100).toFixed(1) }}%），
+            猜错会亏掉全部 {{ pts(quote!.amount) }} 积分。
           </div>
 
           <button

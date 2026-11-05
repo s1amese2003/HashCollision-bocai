@@ -1,9 +1,11 @@
 import type { WebSocket } from 'ws';
 
 export type HubEvent =
-  | { type: 'market'; marketId: number; priceYes: number; status: string; volume: number }
+  /** priceYes is null for fixed-odds markets. */
+  | { type: 'market'; marketId: number; priceYes: number | null; status: string; volume: number }
   | { type: 'halt'; halted: boolean }
-  | { type: 'trade'; marketId: number; username: string; outcome: string; side: string; amount: number; priceAfter: number };
+  | { type: 'trade'; marketId: number; username: string; outcome: string; side: string; amount: number; priceAfter: number }
+  | { type: 'bet'; marketId: number; username: string; label: string; stake: number; odds: number };
 
 /** Fan-out of server events to connected WebSocket clients. */
 export class Hub {

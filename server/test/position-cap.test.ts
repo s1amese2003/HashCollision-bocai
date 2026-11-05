@@ -18,7 +18,7 @@ beforeEach(async () => {
     adminUsernames: ['admin'],
     webDir: '',
     houseSubsidy: 500 * SCALE,
-    feeBps: 200,
+    signupBonus: 1000 * SCALE,
     positionCapB: 2,
   });
   db = openDb(':memory:');
@@ -73,8 +73,8 @@ function conserved(): boolean {
 const buy = (cookie: string, id: number, outcome: 'YES' | 'NO', points: number) =>
   call('POST', `/api/markets/${id}/trade`, cookie, { outcome, side: 'BUY', amount: Math.round(points * SCALE) });
 
-describe('trading fee', () => {
-  it('buy: total = cost + 2% fee, never above the budget, and fee goes to the pool', async () => {
+describe('no trading fee', () => {
+  it('a buy costs exactly the LMSR amount and a round trip loses nothing', async () => {
     const creator = await signup('alice');
     const trader = await signup('bob');
     const id = await newMarket(creator);
@@ -83,75 +83,14 @@ describe('trading fee', () => {
     const r = await buy(trader, id, 'YES', 100);
     expect(r.status).toBe(200);
     const q = r.body.quote;
-    expect(q.fee).toBe(Math.ceil(q.amount * 0.02));
-    expect(q.total).toBe(q.amount + q.fee);
-    expect(q.total).toBeLessThanOrEqual(100 * SCALE);
-    expect(q.total).toBeGreaterThan(99 * SCALE); // budget is (nearly) fully used
-    expect(r.body.balance).toBe(cfg.signupBonus - q.total);
+    expect(q.fee).toBeUndefined();
+    expect(q.amount).toBe(100 * SCALE);
+    expect(r.body.balance).toBe(cfg.signupBonus - q.amount);
+    expect(scalar('SELECT pool AS s FROM markets WHERE id = ?', id)).toBe(poolBefore + q.amount);
 
-    expect(scalar('SELECT pool AS s FROM markets WHERE id = ?', id)).toBe(poolBefore + q.total);
-    expect(scalar('SELECT fees AS s FROM markets WHERE id = ?', id)).toBe(q.fee);
-    expect(reconcile(db).ok).toBe(true);
-  });
-
-  it('sell: user receives proceeds - fee, so a round trip costs about 4%', async () => {
-    const creator = await signup('alice');
-    const trader = await signup('bob');
-    const id = await newMarket(creator);
-    const b = await buy(trader, id, 'YES', 100);
-    const shares = b.body.quote.shares;
-
-    const s = await call('POST', `/api/markets/${id}/trade`, trader, { outcome: 'YES', side: 'SELL', shares });
+    const s = await call('POST', `/api/markets/${id}/trade`, trader, { outcome: 'YES', side: 'SELL', shares: q.shares });
     expect(s.status).toBe(200);
-    expect(s.body.quote.total).toBe(s.body.quote.amount - s.body.quote.fee);
-
-    const lost = cfg.signupBonus - (await balanceOf(trader));
-    expect(lost).toBeGreaterThan(3.5 * SCALE);
-    expect(lost).toBeLessThan(4.5 * SCALE);
-    expect(reconcile(db).ok).toBe(true);
-    expect(conserved()).toBe(true);
-  });
-
-  it('sell slippage guard compares against what the user actually receives', async () => {
-    const creator = await signup('alice');
-    const trader = await signup('bob');
-    const id = await newMarket(creator);
-    const shares = (await buy(trader, id, 'YES', 50)).body.quote.shares;
-    const q = await call('POST', `/api/markets/${id}/quote`, trader, { outcome: 'YES', side: 'SELL', shares });
-    const tooGreedy = await call('POST', `/api/markets/${id}/trade`, trader, {
-      outcome: 'YES',
-      side: 'SELL',
-      shares,
-      minAmount: q.body.quote.amount, // gross, i.e. ignoring the fee: must be rejected
-    });
-    expect(tooGreedy.status).toBe(409);
-    const ok = await call('POST', `/api/markets/${id}/trade`, trader, {
-      outcome: 'YES',
-      side: 'SELL',
-      shares,
-      minAmount: q.body.quote.total,
-    });
-    expect(ok.status).toBe(200);
-  });
-
-  it('fees end up with the liquidity providers at settlement, and cancel refunds fees too', async () => {
-    const creator = await signup('alice');
-    const admin = await signup('admin');
-    const a = await signup('bob');
-    const c = await signup('carol');
-
-    const m1 = await newMarket(creator);
-    await buy(a, m1, 'YES', 100);
-    await buy(c, m1, 'NO', 100);
-    await call('POST', `/api/markets/${m1}/resolve`, admin, { outcome: 'YES' });
-    expect(reconcile(db).ok).toBe(true);
-    expect(conserved()).toBe(true);
-
-    const m2 = await newMarket(creator);
-    const before = await balanceOf(a);
-    await buy(a, m2, 'YES', 100);
-    await call('POST', `/api/markets/${m2}/cancel`, admin, {});
-    expect(await balanceOf(a)).toBe(before); // full refund including the fee
+    expect(Math.abs(cfg.signupBonus - (await balanceOf(trader)))).toBeLessThanOrEqual(2);
     expect(reconcile(db).ok).toBe(true);
     expect(conserved()).toBe(true);
   });
@@ -209,7 +148,7 @@ describe('position cap', () => {
   });
 });
 
-describe('random trading with fees and caps', () => {
+describe('random trading with position caps', () => {
   it('conserves points and keeps every invariant', async () => {
     let seed = 99;
     const rnd = () => {

@@ -1,9 +1,21 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue';
-import { api, dateTime, OUTCOME_LABEL, pts, REASON_LABEL, STATUS_LABEL, type LedgerRow, type PortfolioItem } from '../api';
+import {
+  api,
+  dateTime,
+  fmtOdds,
+  OUTCOME_LABEL,
+  pts,
+  REASON_LABEL,
+  STATUS_LABEL,
+  type LedgerRow,
+  type OpenBet,
+  type PortfolioItem,
+} from '../api';
 import { store, toastError } from '../store';
 
 const positions = ref<PortfolioItem[]>([]);
+const bets = ref<OpenBet[]>([]);
 const ledger = ref<LedgerRow[]>([]);
 const loading = ref(true);
 
@@ -11,6 +23,7 @@ onMounted(async () => {
   try {
     const r = await api.portfolio();
     positions.value = r.positions;
+    bets.value = r.bets;
     ledger.value = r.ledger;
   } catch (e) {
     toastError(e);
@@ -21,9 +34,10 @@ onMounted(async () => {
 
 const totalValue = computed(() => positions.value.reduce((s, p) => s + p.value, 0));
 const totalCost = computed(() => positions.value.reduce((s, p) => s + p.costBasis, 0));
+const totalStake = computed(() => bets.value.reduce((s, b) => s + b.stake, 0));
 
 function refLink(r: LedgerRow): string | null {
-  const m = /^m(\d+)$/.exec(r.refId);
+  const m = /^m(\d+)(:|$)/.exec(r.refId);
   return m ? `/m/${m[1]}` : null;
 }
 </script>
@@ -39,6 +53,10 @@ function refLink(r: LedgerRow): string | null {
       <div class="card stat">
         <div class="muted small">持仓现值</div>
         <div class="v num">{{ pts(totalValue) }}</div>
+      </div>
+      <div class="card stat">
+        <div class="muted small">未结算投注</div>
+        <div class="v num">{{ pts(totalStake) }}</div>
       </div>
       <div class="card stat">
         <div class="muted small">持仓浮动盈亏</div>
@@ -76,6 +94,28 @@ function refLink(r: LedgerRow): string | null {
       </div>
     </div>
 
+    <div v-if="bets.length" class="card">
+      <h3>未结算投注</h3>
+      <div class="table-wrap">
+        <table class="small">
+          <thead><tr><th>市场</th><th>选项</th><th>金额</th><th>赔率</th><th>猜中可得</th><th>时间</th></tr></thead>
+          <tbody>
+            <tr v-for="b in bets" :key="b.betId">
+              <td>
+                <RouterLink :to="`/m/${b.marketId}`" class="link">{{ b.title }}</RouterLink>
+                <span class="badge" :class="b.status">{{ STATUS_LABEL[b.status] }}</span>
+              </td>
+              <td>{{ b.label }}</td>
+              <td class="num">{{ pts(b.stake) }}</td>
+              <td class="num">{{ fmtOdds(b.odds) }}</td>
+              <td class="num">{{ pts(b.payout) }}</td>
+              <td class="muted">{{ dateTime(b.createdAt) }}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
     <div class="card">
       <h3>积分流水</h3>
       <div v-if="!loading && ledger.length === 0" class="muted small pad">暂无记录</div>
@@ -102,7 +142,7 @@ function refLink(r: LedgerRow): string | null {
 <style scoped>
 .stats {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(4, 1fr);
   gap: 12px;
 }
 .stat .v {

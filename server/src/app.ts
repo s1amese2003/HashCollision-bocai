@@ -45,6 +45,20 @@ import {
   setMarketPaused,
   userPositions,
 } from './markets.js';
+import {
+  MAX_ODDS,
+  MAX_OPTIONS,
+  MIN_ODDS,
+  MIN_OPTIONS,
+  MIN_STAKE,
+  addDeposit,
+  createOddsMarket,
+  openBets,
+  placeBet,
+  recentBets,
+  updateOdds,
+  userBets,
+} from './odds.js';
 
 const SESSION_COOKIE = 'sid';
 
@@ -75,14 +89,30 @@ const unitsInt = z.number().int().positive().max(1e12);
 const idParam = z.object({ id: z.coerce.number().int().positive() });
 
 const credentials = z.object({ username, password });
-const createMarketBody = z.object({
+const marketBase = {
   title: z.string().trim().min(5, '标题至少 5 个字').max(120),
   description: z.string().trim().max(2000).default(''),
   rules: z.string().trim().min(5, '请写清判定规则').max(2000),
   sourceUrl: z.union([z.url().max(500), z.literal('')]).optional(),
   closeAt: z.number().int().positive(),
-  subsidy: unitsInt,
+};
+const createMarketBody = z.object({ ...marketBase, kind: z.literal('LMSR').optional(), subsidy: unitsInt });
+/** Decimal odds x 100, e.g. 185 = 1.85. */
+const oddsInt = z.number().int('赔率最多两位小数');
+const createOddsMarketBody = z.object({
+  ...marketBase,
+  kind: z.literal('ODDS'),
+  deposit: unitsInt,
+  options: z
+    .array(z.object({ label: z.string().trim().min(1, '选项名称不能为空').max(30, '选项名称最多 30 个字'), odds: oddsInt }))
+    .min(MIN_OPTIONS, `至少 ${MIN_OPTIONS} 个选项`)
+    .max(MAX_OPTIONS, `最多 ${MAX_OPTIONS} 个选项`),
 });
+const betBody = z.object({ optionId: z.number().int().positive(), stake: unitsInt, odds: oddsInt });
+const oddsBody = z.object({
+  odds: z.array(z.object({ optionId: z.number().int().positive(), odds: oddsInt })).min(1).max(MAX_OPTIONS),
+});
+const depositBody = z.object({ amount: unitsInt });
 const tradeBody = z.object({
   outcome,
   side: z.enum(['BUY', 'SELL']),
@@ -91,7 +121,12 @@ const tradeBody = z.object({
   minShares: z.number().int().nonnegative().optional(),
   minAmount: z.number().int().nonnegative().optional(),
 });
-const resolveBody = z.object({ outcome, note: z.string().trim().max(1000).default('') });
+/** `outcome` for YES/NO markets, `optionId` for fixed-odds markets. */
+const resolveBody = z.object({
+  outcome: outcome.optional(),
+  optionId: z.number().int().positive().optional(),
+  note: z.string().trim().max(1000).default(''),
+});
 const cancelBody = z.object({ note: z.string().trim().max(1000).default('') });
 const pauseBody = z.object({ paused: z.boolean() });
 const haltBody = z.object({ halted: z.boolean() });
@@ -119,8 +154,6 @@ function quoteView(q: BoundedQuote) {
     avgPrice: q.avgPrice,
     capped: q.capped,
     cappedBy: q.cappedBy,
-    fee: q.fee,
-    total: q.total,
   };
 }
 
@@ -223,8 +256,12 @@ export async function buildApp(deps: AppDeps): Promise<App> {
         minSubsidy: cfg.minSubsidy,
         maxSubsidy: cfg.maxSubsidy,
         houseSubsidy: cfg.houseSubsidy,
-        feeBps: cfg.feeBps,
         positionCapB: cfg.positionCapB,
+        minDeposit: cfg.minDeposit,
+        minStake: MIN_STAKE,
+        minOdds: MIN_ODDS,
+        maxOdds: MAX_ODDS,
+        maxOptions: MAX_OPTIONS,
         disputeWindowMs: cfg.disputeWindowMs,
       },
       tradingHalted: isTradingHalted(db),
@@ -246,8 +283,14 @@ export async function buildApp(deps: AppDeps): Promise<App> {
 
   app.post('/api/markets', tradeLimit, async (req) => {
     const u = requireUser(req);
-    const body = createMarketBody.parse(req.body);
-    const id = createMarket(db, cfg, u, { ...body, sourceUrl: body.sourceUrl || null }, now());
+    let id: number;
+    if ((req.body as { kind?: unknown } | null)?.kind === 'ODDS') {
+      const body = createOddsMarketBody.parse(req.body);
+      id = createOddsMarket(db, cfg, u, { ...body, sourceUrl: body.sourceUrl || null }, now());
+    } else {
+      const body = createMarketBody.parse(req.body);
+      id = createMarket(db, cfg, u, { ...body, sourceUrl: body.sourceUrl || null }, now());
+    }
     emitMarket(id);
     return { id };
   });
@@ -256,8 +299,12 @@ export async function buildApp(deps: AppDeps): Promise<App> {
     const { id } = idParam.parse(req.params);
     const t = now();
     const u = currentUser(req);
+    const market = getMarket(db, cfg, id, t);
+    if (market.kind === 'ODDS') {
+      return { market, bets: recentBets(db, id), myBets: u ? userBets(db, u.id, id) : null };
+    }
     return {
-      market: getMarket(db, cfg, id, t),
+      market,
       trades: recentTrades(db, id),
       positions: u ? userPositions(db, u.id, id) : null,
     };
@@ -286,17 +333,47 @@ export async function buildApp(deps: AppDeps): Promise<App> {
       username: u.username,
       outcome: r.quote.outcome,
       side: r.quote.side,
-      amount: r.quote.total,
+      amount: r.quote.amount,
       priceAfter: r.quote.priceYesAfter,
     });
     return { tradeId: r.tradeId, quote: quoteView(r.quote), balance: r.balance };
+  });
+
+  // --- fixed-odds markets -------------------------------------------------------
+
+  app.post('/api/markets/:id/bet', tradeLimit, async (req) => {
+    const u = requireUser(req);
+    const { id } = idParam.parse(req.params);
+    const body = betBody.parse(req.body);
+    const r = placeBet(db, u, id, body, now());
+    emitMarket(id);
+    hub.broadcast({ type: 'bet', marketId: id, username: u.username, label: r.label, stake: r.stake, odds: r.odds });
+    return { bet: r, balance: r.balance };
+  });
+
+  app.post('/api/markets/:id/odds', async (req) => {
+    const u = requireUser(req);
+    const { id } = idParam.parse(req.params);
+    const body = oddsBody.parse(req.body);
+    updateOdds(db, u, id, body.odds, now());
+    emitMarket(id);
+    return { market: getMarket(db, cfg, id, now()) };
+  });
+
+  app.post('/api/markets/:id/deposit', async (req) => {
+    const u = requireUser(req);
+    const { id } = idParam.parse(req.params);
+    const body = depositBody.parse(req.body);
+    addDeposit(db, u, id, body.amount, now());
+    emitMarket(id);
+    return { market: getMarket(db, cfg, id, now()) };
   });
 
   app.post('/api/markets/:id/propose', async (req) => {
     const u = requireUser(req);
     const { id } = idParam.parse(req.params);
     const body = resolveBody.parse(req.body);
-    proposeResolution(db, u, id, body.outcome, body.note, now());
+    proposeResolution(db, u, id, { outcome: body.outcome, optionId: body.optionId }, body.note, now());
     emitMarket(id);
     return { market: getMarket(db, cfg, id, now()) };
   });
@@ -305,7 +382,7 @@ export async function buildApp(deps: AppDeps): Promise<App> {
     const u = requireAdmin(req);
     const { id } = idParam.parse(req.params);
     const body = resolveBody.parse(req.body);
-    adminResolve(db, u, id, body.outcome, body.note, now());
+    adminResolve(db, u, id, { outcome: body.outcome, optionId: body.optionId }, body.note, now());
     emitMarket(id);
     return { market: getMarket(db, cfg, id, now()) };
   });
@@ -358,7 +435,8 @@ export async function buildApp(deps: AppDeps): Promise<App> {
 
   app.get('/api/portfolio', async (req) => {
     const u = requireUser(req);
-    return portfolio(db, u.id, now());
+    const t = now();
+    return { ...portfolio(db, u.id, t), bets: openBets(db, u.id, t) };
   });
 
   app.get('/api/leaderboard', async () => ({ leaderboard: leaderboard(db) }));
